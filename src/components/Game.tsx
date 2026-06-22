@@ -6,6 +6,7 @@ import { connectWallet, mintItemWithWallet, sellItemWithWallet, shortAddr } from
 import {
   activeSet,
   atkOf,
+  BOONS,
   boonChoices,
   critOf,
   defOf,
@@ -79,6 +80,38 @@ function makeGame(name: string, klass: Character["klass"]): GameState {
   };
 }
 
+/** The daily challenge — quest + a free "decree" boon are deterministic per UTC day. */
+function makeDailyGame(name: string, klass: Character["klass"]): { game: GameState; decree: Boon } {
+  const key = todayKey();
+  const h = hashStr(key);
+  const q = QUESTS[h % QUESTS.length];
+  const decree = BOONS[h % BOONS.length];
+  const now = new Date().toISOString();
+  let character = newCharacter(name.trim() || "Wanderer", klass);
+  // apply the decree boon up-front
+  character = { ...character, mods: { ...character.mods } };
+  if (decree.mods) {
+    for (const k of Object.keys(decree.mods) as (keyof CharMods)[]) {
+      character.mods[k] = (character.mods[k] ?? 0) + (decree.mods[k] ?? 0);
+    }
+  }
+  if (decree.maxHp) { character.maxHp += decree.maxHp; character.hp += decree.maxHp; }
+  return {
+    game: {
+      character,
+      seed: `Daily ${key} · ${q.seed}`,
+      questGoal: q.goal,
+      status: "playing",
+      log: [],
+      depth: 1,
+      prevRootHash: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    decree,
+  };
+}
+
 /** Backfill fields that may be absent in older saves loaded from 0G Storage. */
 function normalizeState(s: GameState): GameState {
   const c = s.character;
@@ -116,9 +149,74 @@ interface RunEntry {
   gold: number;
   outcome: GameStatus;
   date: string;
+  daily?: boolean;
   rootHash?: string;
   explorerUrl?: string | null;
 }
+
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/* ── meta progression: Echoes currency + persistent unlocks ────────────────── */
+interface Meta {
+  echoes: number;
+  unlocks: string[];
+}
+const META_KEY = "gmzero.meta";
+
+function loadMeta(): Meta {
+  if (typeof window === "undefined") return { echoes: 0, unlocks: [] };
+  try {
+    const m = JSON.parse(localStorage.getItem(META_KEY) ?? "{}") as Partial<Meta>;
+    return { echoes: m.echoes ?? 0, unlocks: Array.isArray(m.unlocks) ? m.unlocks : [] };
+  } catch {
+    return { echoes: 0, unlocks: [] };
+  }
+}
+function saveMeta(m: Meta) {
+  try {
+    localStorage.setItem(META_KEY, JSON.stringify(m));
+  } catch {
+    /* best-effort */
+  }
+}
+
+interface Unlock {
+  id: string;
+  label: string;
+  desc: string;
+  cost: number;
+}
+const UNLOCKS: Unlock[] = [
+  { id: "hearty", label: "Hearty", desc: "+8 starting Max HP", cost: 4 },
+  { id: "prospector", label: "Prospector", desc: "+60 starting gold", cost: 4 },
+  { id: "armed", label: "Armed", desc: "+2 ATK from the start", cost: 6 },
+  { id: "lucky", label: "Lucky", desc: "+6% base crit", cost: 7 },
+  { id: "venomous", label: "Venomous", desc: "+1 poison on hit", cost: 7 },
+  { id: "leech", label: "Leech", desc: "10% lifesteal from the start", cost: 9 },
+];
+
+/** Apply purchased meta unlocks to a freshly forged hero. */
+function applyUnlocks(c: Character, unlocks: string[]): Character {
+  const u = new Set(unlocks);
+  const nc: Character = { ...c, mods: { ...c.mods } };
+  if (u.has("hearty")) { nc.maxHp += 8; nc.hp += 8; }
+  if (u.has("prospector")) nc.gold += 60;
+  if (u.has("armed")) nc.mods.atk += 2;
+  if (u.has("lucky")) nc.mods.crit += 0.06;
+  if (u.has("venomous")) nc.mods.poison += 1;
+  if (u.has("leech")) nc.mods.lifesteal += 0.1;
+  return nc;
+}
+
+/** Today's UTC date — the daily challenge key (same dungeon for everyone). */
+const todayKey = () => new Date().toISOString().slice(0, 10);
 
 const BOARD_KEY = "gmzero.leaderboard";
 
@@ -171,8 +269,11 @@ export default function Game() {
   const [wallet, setWallet] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [board, setBoard] = useState<RunEntry[]>([]);
+  const [meta, setMeta] = useState<Meta>({ echoes: 0, unlocks: [] });
+  const [dailyDecree, setDailyDecree] = useState<string | null>(null);
   const lastRunIdRef = useRef<string | null>(null);
   const recordedRef = useRef(false);
+  const isDailyRef = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
   // Latest state for async callbacks (combat runs outside React's render cycle).
   const stateRef = useRef<GameState | null>(state);
@@ -185,9 +286,10 @@ export default function Game() {
       .then((r) => r.json())
       .then(setStatus)
       .catch(() => setStatus({ mode: "mock", chainId: 16602, explorer: "", storageExplorer: "" }));
-    // Read the leaderboard from localStorage after mount (avoids SSR hydration mismatch).
+    // Read persisted state from localStorage after mount (avoids SSR hydration mismatch).
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBoard(loadBoard());
+    setMeta(loadMeta());
   }, []);
 
   // Record a run to the local leaderboard once it ends (defeat/victory).
@@ -206,8 +308,16 @@ export default function Game() {
           gold: state.character.gold,
           outcome: state.status,
           date: new Date().toISOString(),
+          daily: isDailyRef.current,
         }),
       );
+      // Award Echoes (meta currency) for the run's depth.
+      const earned = state.depth + (state.status === "victory" ? 5 : 0);
+      setMeta((prev) => {
+        const next = { ...prev, echoes: prev.echoes + earned };
+        saveMeta(next);
+        return next;
+      });
     }
     if (state.status === "playing") recordedRef.current = false;
   }, [state]);
@@ -246,9 +356,32 @@ export default function Game() {
   function startAdventure() {
     if (!name.trim()) return;
     const g = makeGame(name, klass);
+    g.character = applyUnlocks(g.character, meta.unlocks);
+    isDailyRef.current = false;
+    setDailyDecree(null);
     setLastSave(null);
     setState(g);
     void runTurn(g, BEGIN_ACTION);
+  }
+
+  function startDaily() {
+    if (!name.trim()) return;
+    const { game, decree } = makeDailyGame(name, klass);
+    game.character = applyUnlocks(game.character, meta.unlocks);
+    isDailyRef.current = true;
+    setDailyDecree(decree.label);
+    setLastSave(null);
+    setState(game);
+    void runTurn(game, BEGIN_ACTION);
+  }
+
+  function buyUnlock(u: Unlock) {
+    setMeta((prev) => {
+      if (prev.echoes < u.cost || prev.unlocks.includes(u.id)) return prev;
+      const next = { echoes: prev.echoes - u.cost, unlocks: [...prev.unlocks, u.id] };
+      saveMeta(next);
+      return next;
+    });
   }
 
   function submitAction(e?: React.FormEvent) {
@@ -583,9 +716,11 @@ export default function Game() {
             loadHash={loadHash}
             setLoadHash={setLoadHash}
             onStart={startAdventure}
+            onDaily={startDaily}
             onLoad={loadFromOg}
             busy={busy}
           />
+          <Sanctum meta={meta} onBuy={buyUnlock} />
           {board.length > 0 && <Leaderboard board={board} onLoad={(h) => void loadFromOg(h)} />}
         </>
       ) : (
@@ -612,6 +747,9 @@ export default function Game() {
               <span>{state.seed}</span>
               <span className="text-white/40">·</span>
               <span className="text-white/50">Goal: {state.questGoal}</span>
+              {dailyDecree && (
+                <span className="rounded bg-amber-500/15 px-2 py-0.5 text-amber-300">📅 Decree: {dailyDecree}</span>
+              )}
             </div>
 
             <div
@@ -965,6 +1103,7 @@ function NewGame(props: {
   loadHash: string;
   setLoadHash: (s: string) => void;
   onStart: () => void;
+  onDaily: () => void;
   onLoad: () => void;
   busy: boolean;
 }) {
@@ -1008,6 +1147,14 @@ function NewGame(props: {
           className="mt-6 w-full rounded-lg bg-violet-600 px-4 py-2.5 font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
         >
           {props.busy ? "Summoning the world…" : props.name.trim() ? "Begin the adventure" : "Name your hero to begin"}
+        </button>
+        <button
+          onClick={props.onDaily}
+          disabled={props.busy || !props.name.trim()}
+          title="A fixed dungeon + free decree for everyone today"
+          className="mt-2 w-full rounded-lg border border-amber-400/40 px-4 py-2 text-sm font-medium text-amber-200 transition hover:bg-amber-500/10 disabled:opacity-40"
+        >
+          📅 Daily challenge
         </button>
       </div>
 
@@ -1125,6 +1272,46 @@ function EndBanner({ status, onRestart }: { status: GameStatus; onRestart: () =>
   );
 }
 
+function Sanctum({ meta, onBuy }: { meta: Meta; onBuy: (u: Unlock) => void }) {
+  return (
+    <div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold">🔮 Sanctum</h2>
+        <span className="font-mono text-fuchsia-300">{meta.echoes} ✦ Echoes</span>
+      </div>
+      <p className="mt-1 text-xs text-white/50">
+        Echoes are earned every run (depth reached, +5 for victory). Spend them on permanent unlocks
+        that apply to every new hero.
+      </p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        {UNLOCKS.map((u) => {
+          const owned = meta.unlocks.includes(u.id);
+          const afford = meta.echoes >= u.cost;
+          return (
+            <div key={u.id} className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm text-white/90">{u.label}</p>
+                <p className="text-[11px] text-white/40">{u.desc}</p>
+              </div>
+              {owned ? (
+                <span className="rounded bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">owned</span>
+              ) : (
+                <button
+                  onClick={() => onBuy(u)}
+                  disabled={!afford}
+                  className="rounded-lg bg-fuchsia-600/80 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-fuchsia-500 disabled:opacity-30"
+                >
+                  {u.cost} ✦
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Leaderboard({ board, onLoad }: { board: RunEntry[]; onLoad: (rootHash: string) => void }) {
   return (
     <div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-6">
@@ -1137,6 +1324,7 @@ function Leaderboard({ board, onLoad }: { board: RunEntry[]; onLoad: (rootHash: 
           <li key={r.id} className="flex items-center gap-3 rounded-lg bg-white/5 px-3 py-2 text-sm">
             <span className="w-5 text-center font-mono text-white/40">{i + 1}</span>
             <span className="min-w-0 flex-1 truncate">
+              {r.daily && <span title="Daily challenge">📅 </span>}
               <span className="text-white/90">{r.name}</span>
               <span className="text-white/40"> · {r.klass}</span>
             </span>
