@@ -173,6 +173,33 @@ export const SHOP: ShopEntry[] = [
   { name: "Bone Cleaver of Fury", cost: 120, note: "weapon · big atk" },
 ];
 
+const BASE_VALUE: Record<Rarity, number> = { common: 8, rare: 28, epic: 75, legendary: 180 };
+
+/** Fair gold value of an item from its rarity + stats. Used for selling and pricing. */
+export function marketValue(name: string): number {
+  const d = itemDef(name);
+  return (
+    BASE_VALUE[d.rarity] +
+    (d.atk ?? 0) * 6 +
+    (d.def ?? 0) * 6 +
+    Math.round((d.crit ?? 0) * 120) +
+    (d.poison ?? 0) * 8 +
+    (d.heal ?? 0) * 2
+  );
+}
+
+export interface MarketListing { name: string; price: number; }
+
+/** High-end gear for sale on the marketplace (buy side), priced at a premium. */
+export const MARKET: MarketListing[] = [
+  "Sturdy Cracked Shield of Warding",
+  "Keen Enchanted Dagger",
+  "Brutal Bone Cleaver",
+  "Bone Cleaver of Fury",
+  "Wyrmsteel Blade of Fury",
+  "Crystal Vial",
+].map((name) => ({ name, price: Math.round(marketValue(name) * 1.25) }));
+
 export const slotOf = (name: string, rarity?: Rarity): ItemSlot | undefined => itemDef(name, rarity).slot;
 
 /** Attack bonus of an equipped weapon name (0 if none / not a weapon). */

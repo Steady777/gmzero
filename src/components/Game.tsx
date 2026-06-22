@@ -8,11 +8,14 @@ import {
   defOf,
   isUpgrade,
   itemDef,
+  marketValue,
   poisonOf,
   rollAffixName,
   slotOf,
+  MARKET,
   SHOP,
   type ItemSlot,
+  type MarketListing,
   type ShopEntry,
 } from "@/lib/game/items";
 import {
@@ -26,6 +29,7 @@ import {
   type LogEntry,
   type MintInfo,
   type Rarity,
+  type SaleInfo,
 } from "@/lib/game/types";
 
 interface Status {
@@ -137,8 +141,11 @@ export default function Game() {
   const [loadHash, setLoadHash] = useState("");
   const [proofOf, setProofOf] = useState<LogEntry | null>(null);
   const [shop, setShop] = useState(false);
+  const [market, setMarket] = useState(false);
   const [mints, setMints] = useState<Record<string, MintInfo>>({});
   const [minting, setMinting] = useState<string | null>(null);
+  const [selling, setSelling] = useState<string | null>(null);
+  const [lastSale, setLastSale] = useState<SaleInfo | null>(null);
   const [board, setBoard] = useState<RunEntry[]>([]);
   const lastRunIdRef = useRef<string | null>(null);
   const recordedRef = useRef(false);
@@ -347,6 +354,59 @@ export default function Game() {
     }
   }
 
+  /** Sell a minted item on the marketplace: record the sale on 0G, credit gold. */
+  async function sellMinted(name: string) {
+    if (selling) return;
+    const price = marketValue(name);
+    setSelling(name);
+    setError(null);
+    try {
+      const res = await fetch("/api/sell", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item: name, price, seed: stateRef.current?.seed ?? "" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Sale failed");
+      setLastSale(data.sale as SaleInfo);
+      setState((prev) => {
+        if (!prev) return prev;
+        const c = { ...prev.character, inventory: [...prev.character.inventory], equipped: { ...prev.character.equipped } };
+        const idx = c.inventory.indexOf(name);
+        if (idx === -1) return prev;
+        c.inventory.splice(idx, 1);
+        if (c.equipped.weapon === name) c.equipped.weapon = null;
+        if (c.equipped.shield === name) c.equipped.shield = null;
+        c.gold += price;
+        return { ...prev, character: c, updatedAt: new Date().toISOString() };
+      });
+      setMints((m) => {
+        const n = { ...m };
+        delete n[name];
+        return n;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sale failed");
+    } finally {
+      setSelling(null);
+    }
+  }
+
+  function buyListing(listing: MarketListing) {
+    setState((prev) => {
+      if (!prev || prev.character.gold < listing.price) return prev;
+      const c = { ...prev.character, inventory: [...prev.character.inventory], equipped: { ...prev.character.equipped } };
+      c.gold -= listing.price;
+      c.inventory.push(listing.name);
+      const slot = slotOf(listing.name);
+      if (slot === "weapon" || slot === "shield") {
+        const cur = c.equipped[slot] ? itemDef(c.equipped[slot]!) : null;
+        if (isUpgrade(slot, itemDef(listing.name), cur)) c.equipped[slot] = listing.name;
+      }
+      return { ...prev, character: c, updatedAt: new Date().toISOString() };
+    });
+  }
+
   async function narrateFloor(depth: number) {
     const cur = stateRef.current;
     if (!cur) return;
@@ -526,6 +586,12 @@ export default function Game() {
               storageExplorer={status?.storageExplorer}
             />
             <button
+              onClick={() => setMarket(true)}
+              className="w-full rounded-lg border border-amber-400/40 px-3 py-2 text-sm font-medium text-amber-200 transition hover:bg-amber-500/10"
+            >
+              🛒 Marketplace
+            </button>
+            <button
               onClick={() => {
                 setState(null);
                 setLastSave(null);
@@ -542,6 +608,117 @@ export default function Game() {
       {shop && state && (
         <ShopModal gold={state.character.gold} onBuy={buyItem} onClose={() => setShop(false)} />
       )}
+      {market && state && (
+        <MarketplaceModal
+          gold={state.character.gold}
+          inventory={state.character.inventory}
+          mints={mints}
+          selling={selling}
+          lastSale={lastSale}
+          onSell={sellMinted}
+          onBuy={buyListing}
+          onClose={() => setMarket(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function MarketplaceModal({
+  gold,
+  inventory,
+  mints,
+  selling,
+  lastSale,
+  onSell,
+  onBuy,
+  onClose,
+}: {
+  gold: number;
+  inventory: string[];
+  mints: Record<string, MintInfo>;
+  selling: string | null;
+  lastSale: SaleInfo | null;
+  onSell: (name: string) => void;
+  onBuy: (listing: MarketListing) => void;
+  onClose: () => void;
+}) {
+  // Only minted items in your inventory can be sold (mint → sell pipeline).
+  const sellable = Array.from(new Set(inventory.filter((it) => mints[it])));
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div
+        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-white/15 bg-[#12101c] p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold">🛒 0G Bazaar</h3>
+          <span className="font-mono text-amber-300">{gold} ⛀</span>
+        </div>
+
+        {lastSale && (
+          <div className="mt-3 rounded-lg border border-emerald-400/30 bg-emerald-500/5 p-2 text-[11px]">
+            Sold <span className="text-emerald-200">{lastSale.item}</span> for {lastSale.price} ⛀ ·{" "}
+            <a href={lastSale.explorerUrl} target="_blank" rel="noreferrer" className="text-violet-300 underline">
+              sale tx on chainscan ↗
+            </a>
+            {lastSale.mode === "mock" && <span className="ml-1 text-white/40">(mock)</span>}
+          </div>
+        )}
+
+        {/* Sell side — minted loot only */}
+        <h4 className="mt-4 text-sm font-medium text-white/80">Sell your minted loot</h4>
+        <p className="text-[11px] text-white/40">Mint a drop first (⛓ in your stats) to make it sellable. Each sale is recorded on 0G Chain.</p>
+        <ul className="mt-2 space-y-1.5">
+          {sellable.length === 0 ? (
+            <li className="rounded bg-white/5 px-3 py-2 text-sm text-white/30">No minted items yet.</li>
+          ) : (
+            sellable.map((name) => {
+              const d = itemDef(name);
+              return (
+                <li key={name} className="flex items-center gap-3 rounded-lg bg-white/5 px-3 py-2 text-sm">
+                  <span className={`min-w-0 flex-1 truncate ${RARITY_STYLE[d.rarity].split(" ")[0]}`}>{name}</span>
+                  <button
+                    onClick={() => onSell(name)}
+                    disabled={selling !== null}
+                    className="rounded-lg bg-emerald-600/80 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-emerald-500 disabled:opacity-40"
+                  >
+                    {selling === name ? "selling…" : `Sell ${marketValue(name)} ⛀`}
+                  </button>
+                </li>
+              );
+            })
+          )}
+        </ul>
+
+        {/* Buy side */}
+        <h4 className="mt-5 text-sm font-medium text-white/80">On sale</h4>
+        <ul className="mt-2 space-y-1.5">
+          {MARKET.map((listing) => {
+            const d = itemDef(listing.name);
+            const afford = gold >= listing.price;
+            return (
+              <li key={listing.name} className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm">
+                <span className={`min-w-0 flex-1 truncate ${RARITY_STYLE[d.rarity].split(" ")[0]}`}>{listing.name}</span>
+                <button
+                  onClick={() => onBuy(listing)}
+                  disabled={!afford}
+                  className="rounded-lg bg-amber-600/80 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-amber-500 disabled:opacity-30"
+                >
+                  {listing.price} ⛀
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+
+        <button
+          onClick={onClose}
+          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
+        >
+          Close
+        </button>
+      </div>
     </div>
   );
 }

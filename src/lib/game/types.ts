@@ -80,6 +80,18 @@ export interface MintInfo {
   mode: "live" | "mock";
 }
 
+/** On-chain record of a marketplace sale. */
+export interface SaleInfo {
+  item: string;
+  /** Sale price in gold. */
+  price: number;
+  /** Seller wallet address recorded on-chain. */
+  seller: string;
+  txHash: string;
+  explorerUrl: string;
+  mode: "live" | "mock";
+}
+
 export type GameStatus = "playing" | "victory" | "defeat";
 
 export interface GameState {

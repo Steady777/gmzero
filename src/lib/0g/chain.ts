@@ -1,7 +1,7 @@
 import "server-only";
 import { ethers } from "ethers";
 import { OG, OG_PRIVATE_KEY, resolveMode } from "./config";
-import type { AnchorInfo, MintInfo } from "../game/types";
+import type { AnchorInfo, MintInfo, SaleInfo } from "../game/types";
 
 /**
  * Anchor an outcome summary on 0G Chain by writing its keccak256 digest into the
@@ -72,6 +72,45 @@ export async function mintItem(item: string, seed: string): Promise<MintInfo> {
   return {
     item,
     owner: wallet.address,
+    txHash: tx.hash,
+    explorerUrl: `${OG.explorer}/tx/${tx.hash}`,
+    mode: "live",
+  };
+}
+
+/**
+ * Record a marketplace sale on 0G Chain — an ABI-encoded (seller, item, price)
+ * tuple in tx calldata, giving the trade an auditable on-chain provenance trail.
+ * (A production build would settle this through an ERC-721 + escrow contract.)
+ */
+export async function sellItem(item: string, price: number, seed: string): Promise<SaleInfo> {
+  const payload = ethers.AbiCoder.defaultAbiCoder().encode(
+    ["string", "uint256", "string"],
+    [`GMZero:SALE:${item}`, BigInt(Math.max(0, Math.round(price))), seed],
+  );
+
+  if (resolveMode() === "mock") {
+    const txHash = ethers.keccak256(ethers.toUtf8Bytes(`sale|${item}|${price}|${seed}`));
+    return {
+      item,
+      price,
+      seller: "0xMOCK000000000000000000000000000000000000",
+      txHash,
+      explorerUrl: `${OG.explorer}/tx/${txHash}`,
+      mode: "mock",
+    };
+  }
+
+  if (!OG_PRIVATE_KEY) throw new Error("OG_PRIVATE_KEY is not set");
+  const provider = new ethers.JsonRpcProvider(OG.rpcUrl);
+  const wallet = new ethers.Wallet(OG_PRIVATE_KEY, provider);
+
+  const tx = await wallet.sendTransaction({ to: wallet.address, value: BigInt(0), data: payload });
+
+  return {
+    item,
+    price,
+    seller: wallet.address,
     txHash: tx.hash,
     explorerUrl: `${OG.explorer}/tx/${tx.hash}`,
     mode: "live",

@@ -17,7 +17,7 @@ the load-bearing parts on **0G** — and the game does not work the same without
 |-------|-------------|------------------------|
 | **The Game Master** | **0G Compute** (verifiable inference) | Every narration + d20 roll — and every floor-clear combat recap — is produced by an LLM on the 0G Compute Network and **TEE-verified** via `processResponse`. Swap it for a normal API and the "provably fair" promise collapses. |
 | **Your save** | **0G Storage** | Character, equipment, inventory, depth, and the full adventure log are written to 0G Storage and addressed by a **Merkle root hash you own**. Saves are portable, not locked in our DB. |
-| **Epic moments & loot** | **0G Chain** | Crits, rare drops, and endings are **anchored** on-chain (keccak digest in tx calldata); epic/legendary loot can be **minted** as an on-chain ownership record `(owner, item)` — so "your loot is a real asset" is literally true and explorer-auditable. |
+| **Epic moments & loot** | **0G Chain** | Crits, rare drops, and endings are **anchored** on-chain (keccak digest in tx calldata); epic/legendary loot can be **minted** as an on-chain ownership record `(owner, item)`, and **marketplace sales** are recorded on-chain too `(seller, item, price)` — so "your loot is a real, tradable asset" is literally true and explorer-auditable. |
 
 Open the chip under any turn to see the verification status, provider address, model, and
 verifiability flavor (e.g. `TeeML`) for that exact roll.
@@ -29,27 +29,29 @@ verifiability flavor (e.g. `TeeML`) for that exact roll.
 - **Equipment** — weapons add ATK, shields reduce incoming damage. Drops can roll **affixes** (`Sharp …`, `… of Fury`) that stack stats and bump rarity; better gear auto-equips.
 - **Economy** — a between-floor **shop** spends gold on potions and gear; **consumables** (Healing Herb, Crystal Vial) restore HP.
 - **Mint your loot** — epic/legendary items get a ⛓ Mint button that records ownership on 0G Chain.
+- **Marketplace (0G Bazaar)** — minted loot can be sold for gold (each sale recorded on 0G Chain), and a buy side stocks high-end gear. *Global cross-player trading would settle through an ERC-721 + escrow contract — a follow-up.*
+- **Leaderboard** — deepest runs are kept locally and can be published to 0G Storage, then reloaded by anyone with the root hash.
 
 ## Architecture
 
 ```
 Browser (Game.tsx + PixelStage.tsx)
-   │  /api/gm {state,action}   /api/narrate {state,summary}
-   │  /api/save {state}        /api/load?rootHash   /api/mint {item,seed}
+   │  /api/gm {state,action}   /api/narrate {state,summary}   /api/mint {item,seed}
+   │  /api/save {state}        /api/load?rootHash             /api/sell {item,price,seed}
    ▼
 Next.js API (Node runtime)
    ├─ src/lib/0g/compute.ts   → 0G Compute broker: pick verifiable provider,
    │                            fund ledger, run inference, processResponse()  → proof
    ├─ src/lib/0g/storage.ts   → 0G Storage: MemData → merkleTree → indexer.upload()
    │                            downloadToBlob() by root hash
-   └─ src/lib/0g/chain.ts     → 0G Chain: anchor epic-moment digests + mint loot
-                                ownership records (0-value self-tx w/ calldata)
+   └─ src/lib/0g/chain.ts     → 0G Chain: anchor epic moments + mint loot ownership
+                                + record marketplace sales (0-value self-tx w/ calldata)
 ```
 
 - `src/lib/game/engine.ts` — GM system/user prompts, combat-recap prompt, strict-JSON parsing + applying outcomes.
-- `src/lib/game/items.ts` — item catalog, affix parsing/rolling, shop wares, stat resolution.
+- `src/lib/game/items.ts` — item catalog, affix parsing/rolling, shop + marketplace wares, pricing.
 - `src/components/PixelStage.tsx` — the canvas dungeon combat (waves, bosses, crit/poison, FX).
-- `src/app/api/{gm,narrate,save,load,mint,status}/route.ts` — server endpoints (all `runtime = "nodejs"`).
+- `src/app/api/{gm,narrate,save,load,mint,sell,status}/route.ts` — server endpoints (all `runtime = "nodejs"`).
 
 ## Run it
 
