@@ -70,6 +70,28 @@ export function buildUserPrompt(state: GameState, action: string): string {
   ].join("\n");
 }
 
+/**
+ * Build the user prompt for a COMBAT RECAP — the local pixel battle already
+ * happened and applied its stat changes, so the GM only narrates it (one verified
+ * inference that ties the local arcade combat back to the 0G-served Game Master).
+ */
+export function buildCombatNarrationPrompt(state: GameState, summary: string): string {
+  const c = state.character;
+  return [
+    "This is a COMBAT RECAP, not a new player action. The hero just fought through a",
+    "dungeon floor in real-time. Narrate the aftermath — do NOT invent new loot or",
+    "change stats (set hpDelta, goldDelta to 0, itemsGained/itemsLost empty).",
+    "",
+    `ADVENTURE SEED: ${state.seed}`,
+    `QUEST GOAL: ${state.questGoal}`,
+    `HERO: ${c.name}, level ${c.level} ${c.klass}, HP ${c.hp}/${c.maxHp}.`,
+    `WHAT JUST HAPPENED: ${summary}`,
+    "",
+    'Narrate this in 2-3 vivid sentences. Use outcome "combat", roll 15, and provide',
+    "3 short suggestions for what the hero does next. Return strict JSON only.",
+  ].join("\n");
+}
+
 /** Best-effort parse of a model response into a GmDecision. */
 export function parseDecision(raw: string): GmDecision {
   let text = raw.trim();

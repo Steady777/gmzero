@@ -2,8 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import PixelStage, { type CombatEvent } from "@/components/PixelStage";
+import { atkOf, defOf, isUpgrade, itemDef, slotOf, type ItemSlot } from "@/lib/game/items";
 import {
   BEGIN_ACTION,
+  classAtk,
   newCharacter,
   type AnchorInfo,
   type Character,
@@ -45,9 +47,26 @@ function makeGame(name: string, klass: Character["klass"]): GameState {
     questGoal: q.goal,
     status: "playing",
     log: [],
+    depth: 1,
     prevRootHash: null,
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+/** Backfill fields that may be absent in older saves loaded from 0G Storage. */
+function normalizeState(s: GameState): GameState {
+  const c = s.character;
+  return {
+    ...s,
+    depth: s.depth ?? 1,
+    character: {
+      ...c,
+      equipped: c.equipped ?? {
+        weapon: c.inventory.find((it) => slotOf(it) === "weapon") ?? null,
+        shield: c.inventory.find((it) => slotOf(it) === "shield") ?? null,
+      },
+    },
   };
 }
 
@@ -68,6 +87,11 @@ export default function Game() {
   const [loadHash, setLoadHash] = useState("");
   const [proofOf, setProofOf] = useState<LogEntry | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  // Latest state for async callbacks (combat runs outside React's render cycle).
+  const stateRef = useRef<GameState | null>(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
     fetch("/api/status")
@@ -149,7 +173,7 @@ export default function Game() {
       const res = await fetch(`/api/load?rootHash=${encodeURIComponent(loadHash.trim())}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Load failed");
-      setState(data.state as GameState);
+      setState(normalizeState(data.state as GameState));
       setLoadHash("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Load failed");
@@ -161,12 +185,81 @@ export default function Game() {
   function handleCombat(e: CombatEvent) {
     setState((prev) => {
       if (!prev) return prev;
-      const c = { ...prev.character, inventory: [...prev.character.inventory] };
+      const c = { ...prev.character, inventory: [...prev.character.inventory], equipped: { ...prev.character.equipped } };
       if (e.hpDelta) c.hp = Math.max(0, Math.min(c.maxHp, c.hp + e.hpDelta));
       if (e.goldDelta) c.gold = Math.max(0, c.gold + e.goldDelta);
-      if (e.loot) c.inventory.push(e.loot.name);
+      if (e.loot) {
+        c.inventory.push(e.loot.name);
+        // Auto-equip dropped gear if it beats what's in that slot.
+        const slot = slotOf(e.loot.name, e.loot.rarity);
+        if (slot === "weapon" || slot === "shield") {
+          const cur = c.equipped[slot] ? itemDef(c.equipped[slot]!) : null;
+          if (isUpgrade(slot, itemDef(e.loot.name, e.loot.rarity), cur)) {
+            c.equipped[slot] = e.loot.name;
+          }
+        }
+      }
       const status = c.hp <= 0 ? "defeat" : prev.status;
       return { ...prev, character: c, status, updatedAt: new Date().toISOString() };
+    });
+  }
+
+  /** Record the new depth (run score) and ask the 0G GM to narrate the cleared floor. */
+  function handleFloor(depth: number) {
+    setState((prev) => (prev ? { ...prev, depth: Math.max(prev.depth, depth) } : prev));
+    void narrateFloor(depth);
+  }
+
+  async function narrateFloor(depth: number) {
+    const cur = stateRef.current;
+    if (!cur) return;
+    const summary = `The hero battled through dungeon floor ${depth - 1}, slew its guardian, and descended to floor ${depth}.`;
+    try {
+      const res = await fetch("/api/narrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: cur, summary }),
+      });
+      const data = await res.json();
+      if (!res.ok) return; // best-effort: a failed recap shouldn't interrupt play
+      setState((prev) =>
+        prev ? { ...prev, log: [...prev.log, data.entry as LogEntry], updatedAt: new Date().toISOString() } : prev,
+      );
+    } catch {
+      // ignore — narration is decorative, combat already resolved locally
+    }
+  }
+
+  function equipItem(name: string) {
+    const slot = slotOf(name);
+    if (slot !== "weapon" && slot !== "shield") return;
+    setState((prev) =>
+      prev
+        ? { ...prev, character: { ...prev.character, equipped: { ...prev.character.equipped, [slot]: name } }, updatedAt: new Date().toISOString() }
+        : prev,
+    );
+  }
+
+  function unequipSlot(slot: ItemSlot) {
+    if (slot !== "weapon" && slot !== "shield") return;
+    setState((prev) =>
+      prev
+        ? { ...prev, character: { ...prev.character, equipped: { ...prev.character.equipped, [slot]: null } }, updatedAt: new Date().toISOString() }
+        : prev,
+    );
+  }
+
+  function useConsumable(name: string) {
+    setState((prev) => {
+      if (!prev) return prev;
+      const def = itemDef(name);
+      if (def.slot !== "consumable") return prev;
+      const c = { ...prev.character, inventory: [...prev.character.inventory] };
+      const idx = c.inventory.indexOf(name);
+      if (idx === -1) return prev;
+      c.inventory.splice(idx, 1);
+      c.hp = Math.min(c.maxHp, c.hp + (def.heal ?? 0));
+      return { ...prev, character: c, updatedAt: new Date().toISOString() };
     });
   }
 
@@ -203,7 +296,11 @@ export default function Game() {
                 active={state.status === "playing"}
                 playerHp={state.character.hp}
                 level={state.character.level}
+                atkBonus={atkOf(state.character.equipped.weapon)}
+                defBonus={defOf(state.character.equipped.shield)}
+                startFloor={state.depth}
                 onEvent={handleCombat}
+                onFloor={handleFloor}
               />
             </div>
             <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-violet-300/70">
@@ -270,7 +367,13 @@ export default function Game() {
           </main>
 
           <aside className="space-y-4">
-            <StatsPanel c={state.character} />
+            <StatsPanel
+              c={state.character}
+              depth={state.depth}
+              onEquip={equipItem}
+              onUnequip={unequipSlot}
+              onUse={useConsumable}
+            />
             <SavePanel
               onSave={saveToOg}
               saving={saving}
@@ -487,8 +590,22 @@ function EndBanner({ status, onRestart }: { status: GameStatus; onRestart: () =>
   );
 }
 
-function StatsPanel({ c }: { c: Character }) {
+function StatsPanel({
+  c,
+  depth,
+  onEquip,
+  onUnequip,
+  onUse,
+}: {
+  c: Character;
+  depth: number;
+  onEquip: (name: string) => void;
+  onUnequip: (slot: ItemSlot) => void;
+  onUse: (name: string) => void;
+}) {
   const hpPct = Math.round((c.hp / c.maxHp) * 100);
+  const atk = classAtk(c.klass, c.level) + atkOf(c.equipped.weapon);
+  const def = defOf(c.equipped.shield);
   return (
     <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
       <div className="flex items-baseline justify-between">
@@ -511,24 +628,99 @@ function StatsPanel({ c }: { c: Character }) {
           />
         </div>
       </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
+        <Stat label="ATK" value={`⚔ ${atk}`} tone="text-red-300" />
+        <Stat label="DEF" value={`🛡 ${def}`} tone="text-sky-300" />
+        <Stat label="Depth" value={`⛏ ${depth}`} tone="text-amber-300" />
+      </div>
+
       <div className="mt-3 flex items-center justify-between text-sm">
         <span className="text-white/50">Gold</span>
         <span className="font-mono text-amber-300">{c.gold} ⛀</span>
       </div>
+
+      <div className="mt-3">
+        <p className="text-xs text-white/50">Equipped</p>
+        <div className="mt-1 space-y-1 text-sm">
+          <EquipSlot slot="weapon" label="Weapon" name={c.equipped.weapon} onUnequip={onUnequip} />
+          <EquipSlot slot="shield" label="Shield" name={c.equipped.shield} onUnequip={onUnequip} />
+        </div>
+      </div>
+
       <div className="mt-3">
         <p className="text-xs text-white/50">Inventory</p>
         <ul className="mt-1 space-y-1 text-sm">
           {c.inventory.length === 0 ? (
             <li className="text-white/30">(empty)</li>
           ) : (
-            c.inventory.map((it, i) => (
-              <li key={i} className="rounded bg-white/5 px-2 py-1 text-white/80">
-                {it}
-              </li>
-            ))
+            c.inventory.map((it, i) => {
+              const idef = itemDef(it);
+              const equipped = c.equipped.weapon === it || c.equipped.shield === it;
+              return (
+                <li key={i} className="flex items-center gap-2 rounded bg-white/5 px-2 py-1">
+                  <span className={`flex-1 truncate ${RARITY_STYLE[idef.rarity].split(" ")[0]}`}>{it}</span>
+                  {idef.slot === "consumable" && (
+                    <button
+                      onClick={() => onUse(it)}
+                      className="rounded bg-emerald-600/70 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-500"
+                    >
+                      Use +{idef.heal}
+                    </button>
+                  )}
+                  {(idef.slot === "weapon" || idef.slot === "shield") &&
+                    (equipped ? (
+                      <span className="rounded bg-violet-500/20 px-2 py-0.5 text-[11px] text-violet-200">equipped</span>
+                    ) : (
+                      <button
+                        onClick={() => onEquip(it)}
+                        className="rounded bg-violet-600/70 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-violet-500"
+                      >
+                        Equip{idef.slot === "weapon" ? ` ⚔${idef.atk}` : ` 🛡${idef.def}`}
+                      </button>
+                    ))}
+                </li>
+              );
+            })
           )}
         </ul>
       </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone: string }) {
+  return (
+    <div className="rounded-lg bg-white/5 py-1.5">
+      <p className="text-[10px] uppercase tracking-wide text-white/40">{label}</p>
+      <p className={`font-mono text-sm ${tone}`}>{value}</p>
+    </div>
+  );
+}
+
+function EquipSlot({
+  slot,
+  label,
+  name,
+  onUnequip,
+}: {
+  slot: ItemSlot;
+  label: string;
+  name: string | null;
+  onUnequip: (slot: ItemSlot) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded bg-black/30 px-2 py-1">
+      <span className="text-[11px] uppercase tracking-wide text-white/40">{label}</span>
+      <span className="flex-1 truncate text-white/80">{name ?? <span className="text-white/30">—</span>}</span>
+      {name && (
+        <button
+          onClick={() => onUnequip(slot)}
+          className="rounded px-1.5 py-0.5 text-[11px] text-white/40 hover:bg-white/10 hover:text-white/70"
+        >
+          unequip
+        </button>
+      )}
     </div>
   );
 }

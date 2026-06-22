@@ -1,4 +1,5 @@
 /** Core game types shared between client, API routes and the 0G layer. */
+import { slotOf } from "./items";
 
 export interface Character {
   name: string;
@@ -8,6 +9,13 @@ export interface Character {
   maxHp: number;
   gold: number;
   inventory: string[];
+  /** Currently equipped gear (names reference items in src/lib/game/items.ts). */
+  equipped: Equipped;
+}
+
+export interface Equipped {
+  weapon: string | null;
+  shield: string | null;
 }
 
 export type Rarity = "common" | "rare" | "epic" | "legendary";
@@ -72,6 +80,8 @@ export interface GameState {
   status: GameStatus;
   /** Full ordered adventure log. */
   log: LogEntry[];
+  /** Deepest floor reached in local combat — doubles as the run score. */
+  depth: number;
   /** 0G Storage root hash of the previous save (provenance chain). */
   prevRootHash: string | null;
   createdAt: string;
@@ -92,7 +102,7 @@ export interface GmDecision {
 }
 
 export function newCharacter(name: string, klass: Character["klass"]): Character {
-  const base: Record<Character["klass"], Partial<Character>> = {
+  const base: Record<Character["klass"], { maxHp: number; inventory: string[] }> = {
     Warrior: { maxHp: 30, inventory: ["Iron Sword", "Wooden Shield"] },
     Mage: { maxHp: 18, inventory: ["Oak Staff", "Spellbook"] },
     Rogue: { maxHp: 22, inventory: ["Twin Daggers", "Lockpick"] },
@@ -103,12 +113,20 @@ export function newCharacter(name: string, klass: Character["klass"]): Character
     name,
     klass,
     level: 1,
-    hp: b.maxHp ?? 24,
-    maxHp: b.maxHp ?? 24,
+    hp: b.maxHp,
+    maxHp: b.maxHp,
     gold: 25,
-    inventory: b.inventory ?? [],
+    inventory: b.inventory,
+    equipped: {
+      weapon: b.inventory.find((it) => slotOf(it) === "weapon") ?? null,
+      shield: b.inventory.find((it) => slotOf(it) === "shield") ?? null,
+    },
   };
 }
 
 /** Sentinel action that asks the GM to generate the opening scene. */
 export const BEGIN_ACTION = "__BEGIN__";
+
+/** Inherent (unequipped) attack from class + level. Weapon atk is added on top. */
+export const classAtk = (klass: Character["klass"], level: number): number =>
+  2 + level + (klass === "Warrior" ? 2 : 0);

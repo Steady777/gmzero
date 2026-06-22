@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Character, Rarity } from "@/lib/game/types";
+import { classAtk, type Character, type Rarity } from "@/lib/game/types";
 
 /* ── pixel art (16x16) ─────────────────────────────────────────────────── */
 const HERO_A = [
@@ -85,6 +85,16 @@ const SKILLS: Record<Character["klass"], { name: string; desc: string }> = {
 };
 const SKILL_CD = 3;
 
+/** Normal waves per floor; the next wave after these is a boss. */
+const WAVES_PER_FLOOR = 3;
+/** Bosses by name, picked by floor depth (deeper floors drop better loot). */
+const BOSSES = [
+  { name: "Bone Tyrant", kind: "skeleton" as Kind, hpMult: 3.2, dmg: 7, gold: [40, 70] as [number, number], drop: { name: "Bone Cleaver", rarity: "epic" as Rarity } },
+  { name: "Wyrm Warden", kind: "skeleton" as Kind, hpMult: 4.2, dmg: 9, gold: [80, 130] as [number, number], drop: { name: "Wyrmsteel Blade", rarity: "legendary" as Rarity } },
+];
+/** Per-floor stat multiplier so deeper floors hit harder. */
+const floorMult = (floor: number) => 1 + 0.3 * (floor - 1);
+
 const W = 416, H = 224, SPRITE = 16, SCALE = 2;
 const HERO_X = 56, HERO_Y = 96;
 const ENEMY_X = 300;
@@ -98,22 +108,34 @@ export interface CombatEvent {
 type Turn = "player" | "busy" | "over";
 
 interface Enemy {
-  id: number; kind: Kind; hp: number; maxHp: number;
+  id: number; kind: Kind; name: string; hp: number; maxHp: number;
   x: number; y: number; xOff: number; hitFlash: number; dead: boolean; deadT: number;
+  /** Scaled at spawn so deeper floors hit harder / pay more. */
+  dmg: number; gold: [number, number]; boss: boolean;
+  /** Guaranteed drop for bosses (overrides the random drop table). */
+  bossDrop?: { name: string; rarity: Rarity };
 }
 interface FloatTxt { x: number; y: number; vy: number; life: number; text: string; color: string; }
-interface EnemyView { id: number; kind: Kind; hp: number; maxHp: number; }
+interface EnemyView { id: number; kind: Kind; name: string; hp: number; maxHp: number; boss: boolean; }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default function PixelStage({
-  klass, active, playerHp, level, onEvent,
+  klass, active, playerHp, level, atkBonus, defBonus, startFloor = 1, onEvent, onFloor,
 }: {
   klass: Character["klass"];
   active: boolean;
   playerHp: number;
   level: number;
+  /** Attack bonus from the equipped weapon. */
+  atkBonus: number;
+  /** Flat damage reduction from the equipped shield. */
+  defBonus: number;
+  /** Floor to start the dive on (e.g. resuming a save's depth). */
+  startFloor?: number;
   onEvent: (e: CombatEvent) => void;
+  /** Fired when the hero clears a floor and descends to a deeper one. */
+  onFloor: (depth: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -123,10 +145,15 @@ export default function PixelStage({
   const floatsRef = useRef<FloatTxt[]>([]);
   const hpRef = useRef(playerHp);
   const lvlRef = useRef(level);
+  const atkRef = useRef(atkBonus);
+  const defRef = useRef(defBonus);
   const activeRef = useRef(active);
   const onEventRef = useRef(onEvent);
+  const onFloorRef = useRef(onFloor);
   const defendRef = useRef(false);
   const idRef = useRef(1);
+  const floorRef = useRef(startFloor);
+  const waveNoRef = useRef(1); // wave within the current floor; > WAVES_PER_FLOOR ⇒ boss
 
   // UI state (buttons / log)
   const [turn, setTurn] = useState<Turn>("player");
@@ -134,19 +161,25 @@ export default function PixelStage({
   const [selected, setSelected] = useState<number | null>(null);
   const [log, setLog] = useState<string[]>(["A foe stirs in the dark…"]);
   const [cd, setCd] = useState(0);
+  const [floor, setFloor] = useState(startFloor);
 
   useEffect(() => {
     activeRef.current = active;
     lvlRef.current = level;
+    atkRef.current = atkBonus;
+    defRef.current = defBonus;
     onEventRef.current = onEvent;
+    onFloorRef.current = onFloor;
     if (playerHp > 0) hpRef.current = playerHp; // sync narrative HP changes
     // Note: death is derived from playerHp at render time (see `over`), so we
     // intentionally avoid setState here.
-  }, [active, playerHp, level, onEvent]);
+  }, [active, playerHp, level, atkBonus, defBonus, onEvent, onFloor]);
 
   const refreshView = useCallback(() => {
     setEnemyView(
-      enemiesRef.current.filter((e) => !e.dead).map((e) => ({ id: e.id, kind: e.kind, hp: e.hp, maxHp: e.maxHp })),
+      enemiesRef.current
+        .filter((e) => !e.dead)
+        .map((e) => ({ id: e.id, kind: e.kind, name: e.name, hp: e.hp, maxHp: e.maxHp, boss: e.boss })),
     );
   }, []);
 
@@ -158,21 +191,41 @@ export default function PixelStage({
     floatsRef.current.push({ x, y, vy: -0.025, life: 850, text, color });
 
   const spawnWave = useCallback(() => {
-    const kinds: Kind[] = ["slime", "slime", "bat", "skeleton"];
-    const count = 1 + ((Math.random() * 3) | 0); // 1..3
+    const floorN = floorRef.current;
+    const m = floorMult(floorN);
+    const isBoss = waveNoRef.current > WAVES_PER_FLOOR;
     const list: Enemy[] = [];
-    for (let i = 0; i < count; i++) {
-      const kind = kinds[(Math.random() * kinds.length) | 0];
-      const def = MOBS[kind];
+
+    if (isBoss) {
+      const b = BOSSES[Math.min(BOSSES.length - 1, Math.floor((floorN - 1) / 2))];
+      const hp = Math.round(MOBS[b.kind].hp * b.hpMult * m);
       list.push({
-        id: idRef.current++, kind, hp: def.hp, maxHp: def.hp,
-        x: ENEMY_X, y: ENEMY_SLOTS[i], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
+        id: idRef.current++, kind: b.kind, name: b.name, hp, maxHp: hp,
+        x: ENEMY_X - 6, y: ENEMY_SLOTS[1], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
+        dmg: Math.round(b.dmg * m), gold: [Math.round(b.gold[0] * m), Math.round(b.gold[1] * m)],
+        boss: true, bossDrop: b.drop,
       });
+      pushLog(`⚠ The floor ${floorN} guardian appears: ${b.name}!`);
+    } else {
+      const kinds: Kind[] = ["slime", "slime", "bat", "skeleton"];
+      const count = 1 + ((Math.random() * 3) | 0); // 1..3
+      for (let i = 0; i < count; i++) {
+        const kind = kinds[(Math.random() * kinds.length) | 0];
+        const def = MOBS[kind];
+        const hp = Math.round(def.hp * m);
+        list.push({
+          id: idRef.current++, kind, name: def.name, hp, maxHp: hp,
+          x: ENEMY_X, y: ENEMY_SLOTS[i], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
+          dmg: Math.round(def.dmg * m), gold: [Math.round(def.gold[0] * m), Math.round(def.gold[1] * m)],
+          boss: false,
+        });
+      }
+      pushLog(`${list.length} ${list.length === 1 ? "foe emerges" : "foes emerge"} from the shadows.`);
     }
+
     enemiesRef.current = list;
     refreshView();
     setSelected(list[0]?.id ?? null);
-    pushLog(`${list.length} ${list.length === 1 ? "foe emerges" : "foes emerge"} from the shadows.`);
   }, [refreshView, pushLog]);
 
   // one-time setup: render loop + first wave
@@ -190,7 +243,7 @@ export default function PixelStage({
 
     const drawPix = (
       map: string[], pal: Record<string, string | null>, ox: number, oy: number,
-      flip: boolean, tint?: string, alpha = 1,
+      flip: boolean, tint?: string, alpha = 1, scale = SCALE,
     ) => {
       if (alpha <= 0) return;
       ctx.globalAlpha = alpha;
@@ -201,7 +254,7 @@ export default function PixelStage({
           const col = tint && ch !== "." ? tint : pal[ch];
           if (!col) continue;
           ctx.fillStyle = col;
-          ctx.fillRect(Math.round(ox + x * SCALE), Math.round(oy + y * SCALE), SCALE, SCALE);
+          ctx.fillRect(Math.round(ox + x * scale), Math.round(oy + y * scale), scale, scale);
         }
       }
       ctx.globalAlpha = 1;
@@ -238,12 +291,19 @@ export default function PixelStage({
         let alpha = 1;
         if (e.dead) { e.deadT += dt; alpha = Math.max(0, 1 - e.deadT / 320); }
         const bob = Math.sin((anim + e.id * 140) / 220) * 1.5;
-        const ex = e.x + e.xOff, ey = e.y + bob;
-        ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fillRect(ex + 6, e.y + 30, 20, 4);
-        drawPix(MOBS[e.kind].map, MOBS[e.kind].pal, ex, ey, true, e.hitFlash > 0 ? "#ffffff" : undefined, alpha);
+        const scale = e.boss ? SCALE * 2 : SCALE;
+        // Bosses are 2x — offset so the bigger sprite still rests on the floor.
+        const bx = e.boss ? -16 : 0, by = e.boss ? -16 : 0;
+        const ex = e.x + e.xOff + bx, ey = e.y + bob + by;
+        const w = SPRITE * scale, barW = e.boss ? 44 : 24;
+        ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fillRect(ex + w / 2 - 10, e.y + 30, 20, 4);
+        const tint = e.hitFlash > 0 ? "#ffffff" : e.boss ? "#ffd1d1" : undefined;
+        drawPix(MOBS[e.kind].map, MOBS[e.kind].pal, ex, ey, true, tint, alpha, scale);
         if (!e.dead && e.hp < e.maxHp) {
-          ctx.fillStyle = "#000"; ctx.fillRect(ex + 4, e.y - 4, 24, 3);
-          ctx.fillStyle = "#e0484a"; ctx.fillRect(ex + 4, e.y - 4, (24 * e.hp) / e.maxHp, 3);
+          const barX = ex + w / 2 - barW / 2;
+          ctx.fillStyle = "#000"; ctx.fillRect(barX, ey - 6, barW, 3);
+          ctx.fillStyle = e.boss ? "#ff8a3a" : "#e0484a";
+          ctx.fillRect(barX, ey - 6, (barW * e.hp) / e.maxHp, 3);
         }
       }
 
@@ -271,24 +331,32 @@ export default function PixelStage({
   }, [klass, spawnWave]);
 
   /* ── turn logic ───────────────────────────────────────────────────────── */
-  const heroDamage = () => 3 + lvlRef.current + (klass === "Warrior" ? 2 : 0);
+  // Inherent damage + the equipped weapon's attack bonus (atkRef).
+  const heroDamage = () => classAtk(klass, lvlRef.current) + atkRef.current;
 
   const hitEnemy = (e: Enemy, dmg: number) => {
     e.hp -= dmg; e.hitFlash = 200; e.xOff = -10;
     float(e.x, e.y + 2, `-${dmg}`, "#ff7a7a");
     if (e.hp <= 0 && !e.dead) {
       e.dead = true;
-      const def = MOBS[e.kind];
-      const gold = def.gold[0] + ((Math.random() * (def.gold[1] - def.gold[0] + 1)) | 0);
+      const gold = e.gold[0] + ((Math.random() * (e.gold[1] - e.gold[0] + 1)) | 0);
       onEventRef.current({ goldDelta: gold });
       float(e.x, e.y - 6, `+${gold}g`, "#ffc24a");
-      pushLog(`${def.name} falls! +${gold} gold.`);
-      for (const d of def.drops) {
-        if (Math.random() < d.chance) {
-          onEventRef.current({ loot: { name: d.name, rarity: d.rarity } });
-          float(e.x, e.y - 20, d.name, RARITY_COLOR[d.rarity]);
-          pushLog(`Looted ${d.name}!`);
-          break;
+      pushLog(`${e.boss ? `${e.name} is slain` : `${e.name} falls`}! +${gold} gold.`);
+
+      if (e.boss && e.bossDrop) {
+        // Bosses always drop their signature gear.
+        onEventRef.current({ loot: e.bossDrop });
+        float(e.x, e.y - 20, e.bossDrop.name, RARITY_COLOR[e.bossDrop.rarity]);
+        pushLog(`The ${e.name} yields the ${e.bossDrop.name}!`);
+      } else {
+        for (const d of MOBS[e.kind].drops) {
+          if (Math.random() < d.chance) {
+            onEventRef.current({ loot: { name: d.name, rarity: d.rarity } });
+            float(e.x, e.y - 20, d.name, RARITY_COLOR[d.rarity]);
+            pushLog(`Looted ${d.name}!`);
+            break;
+          }
         }
       }
     }
@@ -300,19 +368,31 @@ export default function PixelStage({
       await sleep(260);
       e.xOff = -22; e.hitFlash = 60;
       await sleep(140);
-      const raw = MOBS[e.kind].dmg;
-      const dmg = defendRef.current ? Math.ceil(raw / 2) : raw;
+      // Shield reduces each hit by defBonus (min 1); Defend then halves what's left.
+      const afterShield = Math.max(1, e.dmg - defRef.current);
+      const dmg = defendRef.current ? Math.max(1, Math.ceil(afterShield / 2)) : afterShield;
       hpRef.current = Math.max(0, hpRef.current - dmg);
       heroRef.current.hitFlash = 220;
       float(HERO_X, HERO_Y, `-${dmg}`, "#ff4d4d");
       onEventRef.current({ hpDelta: -dmg });
-      pushLog(`${MOBS[e.kind].name} hits you for ${dmg}${defendRef.current ? " (blocked)" : ""}.`);
+      const blocked = defendRef.current || defRef.current > 0;
+      pushLog(`${e.name} hits you for ${dmg}${blocked ? " (reduced)" : ""}.`);
       await sleep(120);
       if (hpRef.current <= 0) { setTurn("over"); pushLog("You have fallen…"); return; }
     }
     defendRef.current = false;
     if (alive().length === 0) {
       await sleep(300);
+      if (waveNoRef.current > WAVES_PER_FLOOR) {
+        // Boss cleared → descend to a deeper, harder floor (depth = score).
+        floorRef.current += 1;
+        waveNoRef.current = 1;
+        setFloor(floorRef.current);
+        onFloorRef.current(floorRef.current);
+        pushLog(`Floor cleared. You descend to floor ${floorRef.current}…`);
+      } else {
+        waveNoRef.current += 1;
+      }
       spawnWave();
     } else {
       refreshView();
@@ -384,7 +464,12 @@ export default function PixelStage({
   return (
     <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
       <div className="mb-2 flex items-center justify-between text-xs text-white/50">
-        <span>The chamber · turn-based · choose an action below</span>
+        <span className="inline-flex items-center gap-2">
+          <span className="rounded bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
+            ⛏ Floor {floor}
+          </span>
+          <span>turn-based · deeper = harder</span>
+        </span>
         <span className="text-violet-300/60">{klass}</span>
       </div>
       <div className="relative">
@@ -411,12 +496,16 @@ export default function PixelStage({
               onClick={() => setSelected(e.id)}
               disabled={!canAct}
               className={`rounded-full px-2 py-0.5 text-[11px] ring-1 transition disabled:opacity-50 ${
-                selected === e.id
-                  ? "bg-violet-500/25 text-violet-100 ring-violet-400/60"
-                  : "bg-white/5 text-white/60 ring-white/15 hover:bg-white/10"
+                e.boss
+                  ? selected === e.id
+                    ? "bg-amber-500/30 text-amber-100 ring-amber-400/70"
+                    : "bg-amber-500/10 text-amber-200/80 ring-amber-400/40 hover:bg-amber-500/20"
+                  : selected === e.id
+                    ? "bg-violet-500/25 text-violet-100 ring-violet-400/60"
+                    : "bg-white/5 text-white/60 ring-white/15 hover:bg-white/10"
               }`}
             >
-              {MOBS[e.kind].name} {e.hp}/{e.maxHp}
+              {e.boss ? "☠ " : ""}{e.name} {e.hp}/{e.maxHp}
             </button>
           ))}
         </div>
