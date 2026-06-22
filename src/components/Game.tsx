@@ -2,7 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 import PixelStage, { type CombatEvent } from "@/components/PixelStage";
-import { atkOf, defOf, isUpgrade, itemDef, slotOf, type ItemSlot } from "@/lib/game/items";
+import {
+  atkOf,
+  critOf,
+  defOf,
+  isUpgrade,
+  itemDef,
+  poisonOf,
+  rollAffixName,
+  slotOf,
+  SHOP,
+  type ItemSlot,
+  type ShopEntry,
+} from "@/lib/game/items";
 import {
   BEGIN_ACTION,
   classAtk,
@@ -12,6 +24,7 @@ import {
   type GameState,
   type GameStatus,
   type LogEntry,
+  type MintInfo,
   type Rarity,
 } from "@/lib/game/types";
 
@@ -86,6 +99,9 @@ export default function Game() {
   } | null>(null);
   const [loadHash, setLoadHash] = useState("");
   const [proofOf, setProofOf] = useState<LogEntry | null>(null);
+  const [shop, setShop] = useState(false);
+  const [mints, setMints] = useState<Record<string, MintInfo>>({});
+  const [minting, setMinting] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   // Latest state for async callbacks (combat runs outside React's render cycle).
   const stateRef = useRef<GameState | null>(state);
@@ -189,13 +205,15 @@ export default function Game() {
       if (e.hpDelta) c.hp = Math.max(0, Math.min(c.maxHp, c.hp + e.hpDelta));
       if (e.goldDelta) c.gold = Math.max(0, c.gold + e.goldDelta);
       if (e.loot) {
-        c.inventory.push(e.loot.name);
+        // Dropped gear can roll an affix (deeper floors / rarer bases more often).
+        const name = rollAffixName(e.loot.name, e.loot.rarity, prev.depth);
+        c.inventory.push(name);
         // Auto-equip dropped gear if it beats what's in that slot.
-        const slot = slotOf(e.loot.name, e.loot.rarity);
+        const slot = slotOf(name, e.loot.rarity);
         if (slot === "weapon" || slot === "shield") {
           const cur = c.equipped[slot] ? itemDef(c.equipped[slot]!) : null;
-          if (isUpgrade(slot, itemDef(e.loot.name, e.loot.rarity), cur)) {
-            c.equipped[slot] = e.loot.name;
+          if (isUpgrade(slot, itemDef(name, e.loot.rarity), cur)) {
+            c.equipped[slot] = name;
           }
         }
       }
@@ -204,10 +222,47 @@ export default function Game() {
     });
   }
 
-  /** Record the new depth (run score) and ask the 0G GM to narrate the cleared floor. */
+  /** Record the new depth (run score), open the shop, and narrate the cleared floor. */
   function handleFloor(depth: number) {
     setState((prev) => (prev ? { ...prev, depth: Math.max(prev.depth, depth) } : prev));
+    setShop(true);
     void narrateFloor(depth);
+  }
+
+  function buyItem(entry: ShopEntry) {
+    setState((prev) => {
+      if (!prev || prev.character.gold < entry.cost) return prev;
+      const c = { ...prev.character, inventory: [...prev.character.inventory], equipped: { ...prev.character.equipped } };
+      c.gold -= entry.cost;
+      c.inventory.push(entry.name);
+      const slot = slotOf(entry.name);
+      if (slot === "weapon" || slot === "shield") {
+        const cur = c.equipped[slot] ? itemDef(c.equipped[slot]!) : null;
+        if (isUpgrade(slot, itemDef(entry.name), cur)) c.equipped[slot] = entry.name;
+      }
+      return { ...prev, character: c, updatedAt: new Date().toISOString() };
+    });
+  }
+
+  /** Mint a piece of loot as an on-chain ownership record on 0G Chain. */
+  async function mintLoot(name: string) {
+    if (minting) return;
+    setMinting(name);
+    setError(null);
+    try {
+      const res = await fetch("/api/mint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item: name, seed: stateRef.current?.seed ?? "" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Mint failed");
+      setMints((m) => ({ ...m, [name]: data.mint as MintInfo }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Mint failed");
+    } finally {
+      setMinting(null);
+    }
   }
 
   async function narrateFloor(depth: number) {
@@ -298,6 +353,8 @@ export default function Game() {
                 level={state.character.level}
                 atkBonus={atkOf(state.character.equipped.weapon)}
                 defBonus={defOf(state.character.equipped.shield)}
+                critBonus={critOf(state.character.equipped.weapon)}
+                poisonOnHit={poisonOf(state.character.equipped.weapon)}
                 startFloor={state.depth}
                 onEvent={handleCombat}
                 onFloor={handleFloor}
@@ -370,9 +427,12 @@ export default function Game() {
             <StatsPanel
               c={state.character}
               depth={state.depth}
+              mints={mints}
+              minting={minting}
               onEquip={equipItem}
               onUnequip={unequipSlot}
               onUse={useConsumable}
+              onMint={mintLoot}
             />
             <SavePanel
               onSave={saveToOg}
@@ -394,6 +454,63 @@ export default function Game() {
       )}
 
       {proofOf && <ProofModal entry={proofOf} status={status} onClose={() => setProofOf(null)} />}
+      {shop && state && (
+        <ShopModal gold={state.character.gold} onBuy={buyItem} onClose={() => setShop(false)} />
+      )}
+    </div>
+  );
+}
+
+function ShopModal({
+  gold,
+  onBuy,
+  onClose,
+}: {
+  gold: number;
+  onBuy: (entry: ShopEntry) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-2xl border border-white/15 bg-[#12101c] p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold">🏪 Wandering merchant</h3>
+          <span className="font-mono text-amber-300">{gold} ⛀</span>
+        </div>
+        <p className="mt-1 text-xs text-white/50">Spend your spoils before the next descent. Better gear auto-equips.</p>
+        <ul className="mt-4 space-y-2">
+          {SHOP.map((entry) => {
+            const afford = gold >= entry.cost;
+            return (
+              <li
+                key={entry.name}
+                className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/30 px-3 py-2"
+              >
+                <div className="flex-1">
+                  <p className={`text-sm ${RARITY_STYLE[itemDef(entry.name).rarity].split(" ")[0]}`}>{entry.name}</p>
+                  <p className="text-[11px] text-white/40">{entry.note}</p>
+                </div>
+                <button
+                  onClick={() => onBuy(entry)}
+                  disabled={!afford}
+                  className="rounded-lg bg-amber-600/80 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-amber-500 disabled:opacity-30"
+                >
+                  {entry.cost} ⛀
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+        <button
+          onClick={onClose}
+          className="mt-4 w-full rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
+        >
+          Descend deeper →
+        </button>
+      </div>
     </div>
   );
 }
@@ -593,15 +710,21 @@ function EndBanner({ status, onRestart }: { status: GameStatus; onRestart: () =>
 function StatsPanel({
   c,
   depth,
+  mints,
+  minting,
   onEquip,
   onUnequip,
   onUse,
+  onMint,
 }: {
   c: Character;
   depth: number;
+  mints: Record<string, MintInfo>;
+  minting: string | null;
   onEquip: (name: string) => void;
   onUnequip: (slot: ItemSlot) => void;
   onUse: (name: string) => void;
+  onMint: (name: string) => void;
 }) {
   const hpPct = Math.round((c.hp / c.maxHp) * 100);
   const atk = classAtk(c.klass, c.level) + atkOf(c.equipped.weapon);
@@ -677,6 +800,27 @@ function StatsPanel({
                         className="rounded bg-violet-600/70 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-violet-500"
                       >
                         Equip{idef.slot === "weapon" ? ` ⚔${idef.atk}` : ` 🛡${idef.def}`}
+                      </button>
+                    ))}
+                  {(idef.rarity === "epic" || idef.rarity === "legendary") &&
+                    (mints[it] ? (
+                      <a
+                        href={mints[it].explorerUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-300 ring-1 ring-amber-400/30 hover:brightness-125"
+                        title={`Minted on 0G Chain (${mints[it].mode})`}
+                      >
+                        ⛓ minted ↗
+                      </a>
+                    ) : (
+                      <button
+                        onClick={() => onMint(it)}
+                        disabled={minting !== null}
+                        className="rounded bg-amber-600/70 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-amber-500 disabled:opacity-40"
+                        title="Mint this loot as an on-chain asset on 0G"
+                      >
+                        {minting === it ? "minting…" : "⛓ Mint"}
                       </button>
                     ))}
                 </li>

@@ -21,6 +21,10 @@ export interface ItemDef {
   def?: number;
   /** HP restored when used (consumables). */
   heal?: number;
+  /** Extra crit chance (0..1) granted by the weapon/affix. */
+  crit?: number;
+  /** Poison stacks applied on hit (weapon affix). */
+  poison?: number;
   rarity: Rarity;
 }
 
@@ -67,10 +71,70 @@ const WEAPON_RE = /(sword|blade|dagger|axe|cleaver|mace|spear|staff|bow|knife|ha
 const SHIELD_RE = /(shield|aegis|buckler|bulwark|barrier|ward)/i;
 const CONSUMABLE_RE = /(herb|potion|vial|elixir|tonic|draught|salve|brew|flask|remedy)/i;
 
-/** Resolve an item's stats, falling back to a name+rarity heuristic for unknowns. */
+const RANK: Record<Rarity, number> = { common: 0, rare: 1, epic: 2, legendary: 3 };
+const RANK_NAME: Rarity[] = ["common", "rare", "epic", "legendary"];
+const bumpRarity = (r: Rarity, by: number): Rarity => RANK_NAME[Math.min(3, RANK[r] + by)];
+
+/** Affixes that can roll onto dropped gear. Name parsing reverses these. */
+const PREFIXES: Record<string, Partial<ItemDef>> = {
+  Sharp: { atk: 2 },
+  Brutal: { atk: 4 },
+  Keen: { atk: 1, crit: 0.1 },
+  Venomous: { poison: 2 },
+  Sturdy: { def: 2 },
+};
+const SUFFIXES: Record<string, Partial<ItemDef>> = {
+  "of Warding": { def: 2 },
+  "of Venom": { poison: 3 },
+  "of Fury": { atk: 3 },
+  "of Precision": { crit: 0.15 },
+};
+
+interface ParsedAffix { base: string; bonus: Partial<ItemDef>; rank: number; }
+
+/** Strip a known prefix/suffix from a name; returns the base + merged bonuses. */
+function parseAffixes(name: string): ParsedAffix | null {
+  let base = name;
+  const bonus: Partial<ItemDef> = {};
+  let rank = 0;
+
+  for (const [suffix, b] of Object.entries(SUFFIXES)) {
+    if (base.endsWith(` ${suffix}`)) {
+      base = base.slice(0, -(suffix.length + 1));
+      mergeBonus(bonus, b);
+      rank++;
+      break;
+    }
+  }
+  for (const [prefix, b] of Object.entries(PREFIXES)) {
+    if (base.startsWith(`${prefix} `)) {
+      base = base.slice(prefix.length + 1);
+      mergeBonus(bonus, b);
+      rank++;
+      break;
+    }
+  }
+  return rank > 0 ? { base, bonus, rank } : null;
+}
+
+function mergeBonus(into: Partial<ItemDef>, add: Partial<ItemDef>) {
+  for (const k of ["atk", "def", "heal", "crit", "poison"] as const) {
+    if (add[k] != null) into[k] = (into[k] ?? 0) + add[k]!;
+  }
+}
+
+/** Resolve an item's stats, handling affixes and falling back to a name+rarity heuristic. */
 export function itemDef(name: string, rarity: Rarity = "common"): ItemDef {
   const known = CATALOG[name];
   if (known) return known;
+
+  const parsed = parseAffixes(name);
+  if (parsed) {
+    const base = itemDef(parsed.base, rarity);
+    const merged: ItemDef = { ...base, rarity: bumpRarity(base.rarity, parsed.rank) };
+    mergeBonus(merged, parsed.bonus);
+    return merged;
+  }
 
   if (SHIELD_RE.test(name)) return { slot: "shield", def: DEF_BY_RARITY[rarity], rarity };
   if (CONSUMABLE_RE.test(name)) return { slot: "consumable", heal: HEAL_BY_RARITY[rarity], rarity };
@@ -78,12 +142,47 @@ export function itemDef(name: string, rarity: Rarity = "common"): ItemDef {
   return { rarity };
 }
 
+/**
+ * Roll a possible affix onto a freshly dropped equippable. Deeper floors and rarer
+ * bases roll affixes more often. Returns a (possibly unchanged) display name.
+ */
+export function rollAffixName(name: string, rarity: Rarity, floor: number): string {
+  const slot = itemDef(name, rarity).slot;
+  if (slot !== "weapon" && slot !== "shield") return name;
+  if (parseAffixes(name)) return name; // already affixed
+
+  const chance = Math.min(0.7, 0.2 + 0.08 * (floor - 1) + RANK[rarity] * 0.1);
+  if (Math.random() > chance) return name;
+
+  // Weapons favor prefixes (offense); shields favor suffixes (defense/utility).
+  const pool = slot === "weapon" ? PREFIXES : SUFFIXES;
+  const keys = Object.keys(pool);
+  const pick = keys[(Math.random() * keys.length) | 0];
+  return slot === "weapon" ? `${pick} ${name}` : `${name} ${pick}`;
+}
+
+export interface ShopEntry { name: string; cost: number; note: string; }
+
+/** Wares offered at the between-floor shop, cheapest first. */
+export const SHOP: ShopEntry[] = [
+  { name: "Healing Herb", cost: 12, note: "+12 HP" },
+  { name: "Crystal Vial", cost: 30, note: "+25 HP" },
+  { name: "Sturdy Cracked Shield", cost: 40, note: "shield · def" },
+  { name: "Sharp Bat Fang", cost: 45, note: "weapon · atk" },
+  { name: "Keen Enchanted Dagger", cost: 80, note: "weapon · atk + crit" },
+  { name: "Bone Cleaver of Fury", cost: 120, note: "weapon · big atk" },
+];
+
 export const slotOf = (name: string, rarity?: Rarity): ItemSlot | undefined => itemDef(name, rarity).slot;
 
 /** Attack bonus of an equipped weapon name (0 if none / not a weapon). */
 export const atkOf = (name: string | null): number => (name ? itemDef(name).atk ?? 0 : 0);
 /** Defense of an equipped shield name (0 if none / not a shield). */
 export const defOf = (name: string | null): number => (name ? itemDef(name).def ?? 0 : 0);
+/** Bonus crit chance from an equipped weapon (0..1). */
+export const critOf = (name: string | null): number => (name ? itemDef(name).crit ?? 0 : 0);
+/** Poison stacks applied on hit by an equipped weapon. */
+export const poisonOf = (name: string | null): number => (name ? itemDef(name).poison ?? 0 : 0);
 
 /** True if `candidate` is a strictly better fit than `current` for the same slot. */
 export function isUpgrade(slot: ItemSlot, candidate: ItemDef, current: ItemDef | null): boolean {

@@ -68,6 +68,18 @@ export interface AnchorInfo {
   mode: "live" | "mock";
 }
 
+/** On-chain ownership record for a minted piece of loot. */
+export interface MintInfo {
+  /** Item name that was minted. */
+  item: string;
+  /** Owner wallet address recorded on-chain. */
+  owner: string;
+  /** 0G Chain transaction hash carrying the mint record. */
+  txHash: string;
+  explorerUrl: string;
+  mode: "live" | "mock";
+}
+
 export type GameStatus = "playing" | "victory" | "defeat";
 
 export interface GameState {

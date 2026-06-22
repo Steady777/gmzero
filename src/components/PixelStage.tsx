@@ -112,16 +112,20 @@ interface Enemy {
   x: number; y: number; xOff: number; hitFlash: number; dead: boolean; deadT: number;
   /** Scaled at spawn so deeper floors hit harder / pay more. */
   dmg: number; gold: [number, number]; boss: boolean;
+  /** Remaining poison stacks (ticks damage at the start of the enemy turn). */
+  poison: number;
   /** Guaranteed drop for bosses (overrides the random drop table). */
   bossDrop?: { name: string; rarity: Rarity };
 }
 interface FloatTxt { x: number; y: number; vy: number; life: number; text: string; color: string; }
-interface EnemyView { id: number; kind: Kind; name: string; hp: number; maxHp: number; boss: boolean; }
+interface Spark { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; }
+interface EnemyView { id: number; kind: Kind; name: string; hp: number; maxHp: number; boss: boolean; poison: number; }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default function PixelStage({
-  klass, active, playerHp, level, atkBonus, defBonus, startFloor = 1, onEvent, onFloor,
+  klass, active, playerHp, level, atkBonus, defBonus, critBonus = 0, poisonOnHit = 0,
+  startFloor = 1, onEvent, onFloor,
 }: {
   klass: Character["klass"];
   active: boolean;
@@ -131,6 +135,10 @@ export default function PixelStage({
   atkBonus: number;
   /** Flat damage reduction from the equipped shield. */
   defBonus: number;
+  /** Extra crit chance (0..1) from the equipped weapon. */
+  critBonus?: number;
+  /** Poison stacks applied to enemies on hit (weapon affix). */
+  poisonOnHit?: number;
   /** Floor to start the dive on (e.g. resuming a save's depth). */
   startFloor?: number;
   onEvent: (e: CombatEvent) => void;
@@ -147,6 +155,9 @@ export default function PixelStage({
   const lvlRef = useRef(level);
   const atkRef = useRef(atkBonus);
   const defRef = useRef(defBonus);
+  const critRef = useRef(critBonus);
+  const poisonHitRef = useRef(poisonOnHit);
+  const heroPoisonRef = useRef(0);
   const activeRef = useRef(active);
   const onEventRef = useRef(onEvent);
   const onFloorRef = useRef(onFloor);
@@ -154,6 +165,11 @@ export default function PixelStage({
   const idRef = useRef(1);
   const floorRef = useRef(startFloor);
   const waveNoRef = useRef(1); // wave within the current floor; > WAVES_PER_FLOOR ⇒ boss
+
+  // polish: screen shake + hit-spark particles + lazy Web Audio
+  const shakeRef = useRef(0);
+  const sparksRef = useRef<Spark[]>([]);
+  const audioRef = useRef<AudioContext | null>(null);
 
   // UI state (buttons / log)
   const [turn, setTurn] = useState<Turn>("player");
@@ -168,18 +184,20 @@ export default function PixelStage({
     lvlRef.current = level;
     atkRef.current = atkBonus;
     defRef.current = defBonus;
+    critRef.current = critBonus;
+    poisonHitRef.current = poisonOnHit;
     onEventRef.current = onEvent;
     onFloorRef.current = onFloor;
     if (playerHp > 0) hpRef.current = playerHp; // sync narrative HP changes
     // Note: death is derived from playerHp at render time (see `over`), so we
     // intentionally avoid setState here.
-  }, [active, playerHp, level, atkBonus, defBonus, onEvent, onFloor]);
+  }, [active, playerHp, level, atkBonus, defBonus, critBonus, poisonOnHit, onEvent, onFloor]);
 
   const refreshView = useCallback(() => {
     setEnemyView(
       enemiesRef.current
         .filter((e) => !e.dead)
-        .map((e) => ({ id: e.id, kind: e.kind, name: e.name, hp: e.hp, maxHp: e.maxHp, boss: e.boss })),
+        .map((e) => ({ id: e.id, kind: e.kind, name: e.name, hp: e.hp, maxHp: e.maxHp, boss: e.boss, poison: e.poison })),
     );
   }, []);
 
@@ -189,6 +207,47 @@ export default function PixelStage({
 
   const float = (x: number, y: number, text: string, color: string) =>
     floatsRef.current.push({ x, y, vy: -0.025, life: 850, text, color });
+
+  const spawnSparks = (x: number, y: number, color: string, n = 8) => {
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2 * i) / n + Math.random();
+      const sp = 0.04 + Math.random() * 0.08;
+      sparksRef.current.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 0.02, life: 360, max: 360, color });
+    }
+  };
+
+  const shake = (amt: number) => { shakeRef.current = Math.max(shakeRef.current, amt); };
+
+  // Lazy Web Audio — a tiny synth so combat has feedback without any asset files.
+  const playSfx = (type: "hit" | "crit" | "loot" | "boss" | "hurt" | "death") => {
+    try {
+      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!audioRef.current) audioRef.current = new Ctx();
+      const ac = audioRef.current;
+      if (ac.state === "suspended") void ac.resume();
+      const tone = (freq: number, dur: number, wave: OscillatorType, vol = 0.05, delay = 0) => {
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+        osc.type = wave;
+        osc.frequency.setValueAtTime(freq, ac.currentTime + delay);
+        gain.gain.setValueAtTime(vol, ac.currentTime + delay);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + delay + dur);
+        osc.connect(gain).connect(ac.destination);
+        osc.start(ac.currentTime + delay);
+        osc.stop(ac.currentTime + delay + dur);
+      };
+      switch (type) {
+        case "hit": tone(220, 0.08, "square"); break;
+        case "crit": tone(440, 0.07, "square", 0.06); tone(660, 0.1, "square", 0.05, 0.05); break;
+        case "loot": tone(660, 0.09, "triangle", 0.05); tone(880, 0.12, "triangle", 0.05, 0.08); break;
+        case "boss": tone(110, 0.4, "sawtooth", 0.05); break;
+        case "hurt": tone(160, 0.14, "sawtooth", 0.05); break;
+        case "death": tone(330, 0.1, "square", 0.05); tone(120, 0.3, "sawtooth", 0.05, 0.1); break;
+      }
+    } catch {
+      // audio is best-effort; ignore unsupported environments
+    }
+  };
 
   const spawnWave = useCallback(() => {
     const floorN = floorRef.current;
@@ -203,9 +262,10 @@ export default function PixelStage({
         id: idRef.current++, kind: b.kind, name: b.name, hp, maxHp: hp,
         x: ENEMY_X - 6, y: ENEMY_SLOTS[1], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
         dmg: Math.round(b.dmg * m), gold: [Math.round(b.gold[0] * m), Math.round(b.gold[1] * m)],
-        boss: true, bossDrop: b.drop,
+        boss: true, poison: 0, bossDrop: b.drop,
       });
       pushLog(`⚠ The floor ${floorN} guardian appears: ${b.name}!`);
+      shake(7); playSfx("boss");
     } else {
       const kinds: Kind[] = ["slime", "slime", "bat", "skeleton"];
       const count = 1 + ((Math.random() * 3) | 0); // 1..3
@@ -217,7 +277,7 @@ export default function PixelStage({
           id: idRef.current++, kind, name: def.name, hp, maxHp: hp,
           x: ENEMY_X, y: ENEMY_SLOTS[i], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
           dmg: Math.round(def.dmg * m), gold: [Math.round(def.gold[0] * m), Math.round(def.gold[1] * m)],
-          boss: false,
+          boss: false, poison: 0,
         });
       }
       pushLog(`${list.length} ${list.length === 1 ? "foe emerges" : "foes emerge"} from the shadows.`);
@@ -269,10 +329,18 @@ export default function PixelStage({
       hero.atkFlash = Math.max(0, hero.atkFlash - dt);
       hero.xOff *= 0.8;
 
-      // backdrop
+      // screen shake (decays each frame)
+      shakeRef.current = Math.max(0, shakeRef.current - dt * 0.04);
+      const sk = shakeRef.current;
+      const sox = sk ? (Math.random() - 0.5) * sk * 2 : 0;
+      const soy = sk ? (Math.random() - 0.5) * sk * 2 : 0;
+      ctx.save();
+      ctx.translate(Math.round(sox), Math.round(soy));
+
+      // backdrop (oversized so shake never reveals the canvas edge)
       const grad = ctx.createLinearGradient(0, 0, 0, H);
       grad.addColorStop(0, "#221b30"); grad.addColorStop(1, "#15111d");
-      ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = grad; ctx.fillRect(-12, -12, W + 24, H + 24);
       // floor band
       ctx.fillStyle = "#1c1726"; ctx.fillRect(0, 168, W, H - 168);
       ctx.fillStyle = "#2a2238";
@@ -313,6 +381,16 @@ export default function PixelStage({
       const tint = hero.hitFlash > 0 ? "#ff5a5a" : hero.atkFlash > 0 ? "#fff2c0" : undefined;
       drawPix(hero.atkFlash > 0 ? HERO_ATK : HERO_A, heroPal, hx, HERO_Y, false, tint);
 
+      // hit-spark particles
+      for (let i = sparksRef.current.length - 1; i >= 0; i--) {
+        const s = sparksRef.current[i];
+        s.life -= dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 0.0006 * dt; // gravity
+        if (s.life <= 0) { sparksRef.current.splice(i, 1); continue; }
+        ctx.globalAlpha = Math.max(0, s.life / s.max); ctx.fillStyle = s.color;
+        ctx.fillRect(Math.round(s.x), Math.round(s.y), 2, 2);
+        ctx.globalAlpha = 1;
+      }
+
       // floats
       ctx.font = "bold 10px ui-monospace, monospace"; ctx.textAlign = "center";
       for (let i = floatsRef.current.length - 1; i >= 0; i--) {
@@ -324,6 +402,7 @@ export default function PixelStage({
       }
       ctx.textAlign = "start";
 
+      ctx.restore();
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -333,53 +412,111 @@ export default function PixelStage({
   /* ── turn logic ───────────────────────────────────────────────────────── */
   // Inherent damage + the equipped weapon's attack bonus (atkRef).
   const heroDamage = () => classAtk(klass, lvlRef.current) + atkRef.current;
+  // Base crit + class affinity (Mage/Rogue) + weapon affix.
+  const critChance = () =>
+    0.08 + (klass === "Mage" ? 0.12 : klass === "Rogue" ? 0.08 : 0) + critRef.current;
 
-  const hitEnemy = (e: Enemy, dmg: number) => {
-    e.hp -= dmg; e.hitFlash = 200; e.xOff = -10;
-    float(e.x, e.y + 2, `-${dmg}`, "#ff7a7a");
-    if (e.hp <= 0 && !e.dead) {
-      e.dead = true;
-      const gold = e.gold[0] + ((Math.random() * (e.gold[1] - e.gold[0] + 1)) | 0);
-      onEventRef.current({ goldDelta: gold });
-      float(e.x, e.y - 6, `+${gold}g`, "#ffc24a");
-      pushLog(`${e.boss ? `${e.name} is slain` : `${e.name} falls`}! +${gold} gold.`);
+  const killEnemy = (e: Enemy) => {
+    if (e.dead) return;
+    e.dead = true;
+    spawnSparks(e.x + 12, e.y + 12, e.boss ? "#ffb86b" : "#ffd0d0", e.boss ? 18 : 10);
+    if (e.boss) shake(8);
+    playSfx("death");
+    const gold = e.gold[0] + ((Math.random() * (e.gold[1] - e.gold[0] + 1)) | 0);
+    onEventRef.current({ goldDelta: gold });
+    float(e.x, e.y - 6, `+${gold}g`, "#ffc24a");
+    pushLog(`${e.boss ? `${e.name} is slain` : `${e.name} falls`}! +${gold} gold.`);
 
-      if (e.boss && e.bossDrop) {
-        // Bosses always drop their signature gear.
-        onEventRef.current({ loot: e.bossDrop });
-        float(e.x, e.y - 20, e.bossDrop.name, RARITY_COLOR[e.bossDrop.rarity]);
-        pushLog(`The ${e.name} yields the ${e.bossDrop.name}!`);
-      } else {
-        for (const d of MOBS[e.kind].drops) {
-          if (Math.random() < d.chance) {
-            onEventRef.current({ loot: { name: d.name, rarity: d.rarity } });
-            float(e.x, e.y - 20, d.name, RARITY_COLOR[d.rarity]);
-            pushLog(`Looted ${d.name}!`);
-            break;
-          }
+    if (e.boss && e.bossDrop) {
+      onEventRef.current({ loot: e.bossDrop });
+      float(e.x, e.y - 20, e.bossDrop.name, RARITY_COLOR[e.bossDrop.rarity]);
+      pushLog(`The ${e.name} yields the ${e.bossDrop.name}!`);
+      playSfx("loot");
+    } else {
+      for (const d of MOBS[e.kind].drops) {
+        if (Math.random() < d.chance) {
+          onEventRef.current({ loot: { name: d.name, rarity: d.rarity } });
+          float(e.x, e.y - 20, d.name, RARITY_COLOR[d.rarity]);
+          pushLog(`Looted ${d.name}!`);
+          playSfx("loot");
+          break;
         }
       }
     }
   };
 
+  const hitEnemy = (e: Enemy, dmg: number, crit = false) => {
+    if (e.dead) return;
+    e.hp -= dmg; e.hitFlash = 200; e.xOff = -10;
+    spawnSparks(e.x + 12, e.y + 10, crit ? "#ffe27a" : "#ff9a9a", crit ? 12 : 6);
+    if (crit) { float(e.x, e.y - 2, `CRIT ${dmg}!`, "#ffd84a"); shake(6); playSfx("crit"); }
+    else { float(e.x, e.y + 2, `-${dmg}`, "#ff7a7a"); shake(2); playSfx("hit"); }
+    if (poisonHitRef.current > 0) {
+      e.poison += poisonHitRef.current;
+      float(e.x + 14, e.y + 12, `☠${e.poison}`, "#8be08b");
+    }
+    if (e.hp <= 0) killEnemy(e);
+  };
+
+  const applyPoisonTick = (e: Enemy) => {
+    const dmg = e.poison;
+    e.hp -= dmg;
+    e.poison -= 1;
+    float(e.x, e.y, `-${dmg}`, "#8be08b");
+    spawnSparks(e.x + 12, e.y + 10, "#8be08b", 5);
+    if (e.hp <= 0) killEnemy(e);
+  };
+
+  /** Tick poison on all poisoned enemies (start of the enemy phase). */
+  const tickEnemyPoison = () => {
+    for (const e of enemiesRef.current) {
+      if (!e.dead && e.poison > 0) applyPoisonTick(e);
+    }
+  };
+
   const enemyTurn = useCallback(async () => {
     const alive = () => enemiesRef.current.filter((e) => !e.dead);
-    for (const e of alive()) {
+
+    // 1) poison ticks on poisoned enemies (may clear the wave outright)
+    if (enemiesRef.current.some((e) => !e.dead && e.poison > 0)) {
+      tickEnemyPoison();
+      refreshView();
       await sleep(260);
+    }
+
+    // 2) surviving enemies attack
+    for (const e of alive()) {
+      await sleep(240);
       e.xOff = -22; e.hitFlash = 60;
       await sleep(140);
       // Shield reduces each hit by defBonus (min 1); Defend then halves what's left.
       const afterShield = Math.max(1, e.dmg - defRef.current);
       const dmg = defendRef.current ? Math.max(1, Math.ceil(afterShield / 2)) : afterShield;
       hpRef.current = Math.max(0, hpRef.current - dmg);
-      heroRef.current.hitFlash = 220;
+      heroRef.current.hitFlash = 220; heroRef.current.xOff = -14;
       float(HERO_X, HERO_Y, `-${dmg}`, "#ff4d4d");
+      spawnSparks(HERO_X + 12, HERO_Y + 12, "#ff6b6b", 7);
+      shake(dmg >= 6 ? 7 : 4); playSfx("hurt");
       onEventRef.current({ hpDelta: -dmg });
       const blocked = defendRef.current || defRef.current > 0;
-      pushLog(`${e.name} hits you for ${dmg}${blocked ? " (reduced)" : ""}.`);
-      await sleep(120);
-      if (hpRef.current <= 0) { setTurn("over"); pushLog("You have fallen…"); return; }
+      let extra = "";
+      if (e.kind === "slime") { heroPoisonRef.current += 1; extra = " · poisoned"; }
+      pushLog(`${e.name} hits you for ${dmg}${blocked ? " (reduced)" : ""}${extra}.`);
+      await sleep(110);
+      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You have fallen…"); return; }
     }
+
+    // 3) hero poison tick
+    if (heroPoisonRef.current > 0) {
+      const dmg = heroPoisonRef.current;
+      hpRef.current = Math.max(0, hpRef.current - dmg);
+      heroPoisonRef.current -= 1;
+      float(HERO_X, HERO_Y - 6, `-${dmg}`, "#8be08b");
+      onEventRef.current({ hpDelta: -dmg });
+      pushLog(`Poison courses through you (-${dmg}).`);
+      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You succumb to poison…"); return; }
+    }
+
     defendRef.current = false;
     if (alive().length === 0) {
       await sleep(300);
@@ -399,6 +536,8 @@ export default function PixelStage({
     }
     setCd((c) => Math.max(0, c - 1));
     setTurn("player");
+    // helper closures (float/spawnSparks/shake/playSfx/tickEnemyPoison) read refs only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pushLog, refreshView, spawnWave]);
 
   const doAttack = useCallback(async () => {
@@ -409,9 +548,10 @@ export default function PixelStage({
     setTurn("busy");
     heroRef.current.xOff = 26; heroRef.current.atkFlash = 200;
     await sleep(160);
-    const dmg = heroDamage();
-    hitEnemy(target, dmg);
-    pushLog(`You strike the ${MOBS[target.kind].name} for ${dmg}!`);
+    const crit = Math.random() < critChance();
+    const dmg = crit ? heroDamage() * 2 : heroDamage();
+    hitEnemy(target, dmg, crit);
+    pushLog(`You strike the ${target.name} for ${dmg}${crit ? " (CRIT!)" : ""}!`);
     refreshView();
     await sleep(220);
     await enemyTurn();
@@ -427,18 +567,21 @@ export default function PixelStage({
     setCd(SKILL_CD + 1); // becomes SKILL_CD after this turn's decrement
     heroRef.current.xOff = 30; heroRef.current.atkFlash = 320;
     const atk = heroDamage();
+    const crit = Math.random() < critChance();
+    const cm = crit ? 2 : 1;
     const sk = SKILLS[klass].name;
-    pushLog(`You unleash ${sk}!`);
+    pushLog(`You unleash ${sk}!${crit ? " CRIT!" : ""}`);
+    shake(crit ? 6 : 4);
     await sleep(180);
     if (klass === "Warrior" || klass === "Ranger") {
       const mult = klass === "Warrior" ? 1 : 0.7;
-      for (const t of targets) hitEnemy(t, Math.max(1, Math.round(atk * mult)));
+      for (const t of targets) hitEnemy(t, Math.max(1, Math.round(atk * mult * cm)), crit);
     } else if (klass === "Mage") {
-      hitEnemy(targets.find((t) => t.id === selected) ?? targets[0], Math.round(atk * 2));
+      hitEnemy(targets.find((t) => t.id === selected) ?? targets[0], Math.round(atk * 2 * cm), crit);
     } else {
       const tgt = targets.find((t) => t.id === selected) ?? targets[0];
-      hitEnemy(tgt, atk);
-      if (!tgt.dead) { await sleep(140); hitEnemy(tgt, atk); }
+      hitEnemy(tgt, atk * cm, crit);
+      if (!tgt.dead) { await sleep(140); hitEnemy(tgt, atk * cm, crit); }
     }
     refreshView();
     await sleep(240);
@@ -506,6 +649,7 @@ export default function PixelStage({
               }`}
             >
               {e.boss ? "☠ " : ""}{e.name} {e.hp}/{e.maxHp}
+              {e.poison > 0 && <span className="ml-1 text-emerald-300">☣{e.poison}</span>}
             </button>
           ))}
         </div>
