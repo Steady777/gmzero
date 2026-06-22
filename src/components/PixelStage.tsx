@@ -126,9 +126,9 @@ const RARITY_COLOR: Record<Rarity, string> = {
 };
 
 const SKILLS: Record<Character["klass"], { name: string; desc: string }> = {
-  Warrior: { name: "Cleave", desc: "Hit all enemies" },
-  Mage: { name: "Firebolt", desc: "Heavy single hit" },
-  Rogue: { name: "Backstab", desc: "2 quick strikes" },
+  Warrior: { name: "Cleave", desc: "Hit all + stun" },
+  Mage: { name: "Firebolt", desc: "Heavy hit + burn" },
+  Rogue: { name: "Backstab", desc: "2 strikes + poison" },
   Ranger: { name: "Volley", desc: "Hit all enemies" },
 };
 const SKILL_CD = 3;
@@ -160,8 +160,12 @@ interface Enemy {
   x: number; y: number; xOff: number; hitFlash: number; dead: boolean; deadT: number;
   /** Scaled at spawn so deeper floors hit harder / pay more. */
   dmg: number; gold: [number, number]; boss: boolean;
-  /** Remaining poison stacks (ticks damage at the start of the enemy turn). */
-  poison: number;
+  /** Damage-over-time / control stacks. */
+  poison: number; burn: number; stun: number;
+  /** >0 means a special attack is telegraphed and fires next turn. */
+  windup: number;
+  /** Boss second-phase flag (set below 50% HP). */
+  enraged: boolean;
   /** Guaranteed drop for bosses (overrides the random drop table). */
   bossDrop?: { name: string; rarity: Rarity };
   /** Override sprite (bosses use a dedicated, larger sprite). */
@@ -170,7 +174,10 @@ interface Enemy {
 }
 interface FloatTxt { x: number; y: number; vy: number; life: number; text: string; color: string; }
 interface Spark { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; }
-interface EnemyView { id: number; kind: Kind; name: string; hp: number; maxHp: number; boss: boolean; poison: number; }
+interface EnemyView {
+  id: number; kind: Kind; name: string; hp: number; maxHp: number; boss: boolean;
+  poison: number; burn: number; stun: number; windup: number; enraged: boolean;
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -209,6 +216,7 @@ export default function PixelStage({
   const critRef = useRef(critBonus);
   const poisonHitRef = useRef(poisonOnHit);
   const heroPoisonRef = useRef(0);
+  const heroBurnRef = useRef(0);
   const activeRef = useRef(active);
   const onEventRef = useRef(onEvent);
   const onFloorRef = useRef(onFloor);
@@ -248,7 +256,10 @@ export default function PixelStage({
     setEnemyView(
       enemiesRef.current
         .filter((e) => !e.dead)
-        .map((e) => ({ id: e.id, kind: e.kind, name: e.name, hp: e.hp, maxHp: e.maxHp, boss: e.boss, poison: e.poison })),
+        .map((e) => ({
+          id: e.id, kind: e.kind, name: e.name, hp: e.hp, maxHp: e.maxHp, boss: e.boss,
+          poison: e.poison, burn: e.burn, stun: e.stun, windup: e.windup, enraged: e.enraged,
+        })),
     );
   }, []);
 
@@ -314,7 +325,7 @@ export default function PixelStage({
         id: idRef.current++, kind: b.kind, name: b.name, hp, maxHp: hp,
         x: ENEMY_X - 6, y: ENEMY_SLOTS[1], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
         dmg: Math.round(b.dmg * m), gold: [Math.round(b.gold[0] * m), Math.round(b.gold[1] * m)],
-        boss: true, poison: 0, bossDrop: b.drop,
+        boss: true, poison: 0, burn: 0, stun: 0, windup: 0, enraged: false, bossDrop: b.drop,
         spriteMap: sprite?.map, spritePal: sprite?.pal,
       });
       pushLog(`⚠ The floor ${floorN} guardian appears: ${b.name}!`);
@@ -336,7 +347,7 @@ export default function PixelStage({
           id: idRef.current++, kind, name: def.name, hp, maxHp: hp,
           x: ENEMY_X, y: ENEMY_SLOTS[i], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
           dmg: Math.round(def.dmg * m), gold: [Math.round(def.gold[0] * m), Math.round(def.gold[1] * m)],
-          boss: false, poison: 0,
+          boss: false, poison: 0, burn: 0, stun: 0, windup: 0, enraged: false,
         });
       }
       pushLog(`${list.length} ${list.length === 1 ? "foe emerges" : "foes emerge"} from the shadows.`);
@@ -439,6 +450,13 @@ export default function PixelStage({
           ctx.fillStyle = e.boss ? "#ff8a3a" : "#e0484a";
           ctx.fillRect(barX, ey - 6, (barW * e.hp) / e.maxHp, 3);
         }
+        // telegraph marker: a blinking "!" above an enemy winding up a special
+        if (!e.dead && e.windup > 0 && Math.sin(anim / 90) > 0) {
+          const mx = ex + w / 2 - 1;
+          ctx.fillStyle = "#ffd84a";
+          ctx.fillRect(mx, ey - 16, 2, 6);
+          ctx.fillRect(mx, ey - 8, 2, 2);
+        }
       }
 
       // hero
@@ -521,66 +539,130 @@ export default function PixelStage({
       e.poison += poisonHitRef.current;
       float(e.x + 14, e.y + 12, `☠${e.poison}`, "#8be08b");
     }
-    if (e.hp <= 0) killEnemy(e);
-  };
-
-  const applyPoisonTick = (e: Enemy) => {
-    const dmg = e.poison;
-    e.hp -= dmg;
-    e.poison -= 1;
-    float(e.x, e.y, `-${dmg}`, "#8be08b");
-    spawnSparks(e.x + 12, e.y + 10, "#8be08b", 5);
-    if (e.hp <= 0) killEnemy(e);
-  };
-
-  /** Tick poison on all poisoned enemies (start of the enemy phase). */
-  const tickEnemyPoison = () => {
-    for (const e of enemiesRef.current) {
-      if (!e.dead && e.poison > 0) applyPoisonTick(e);
+    // Crits can briefly stun (control payoff).
+    if (crit && e.hp > 0 && Math.random() < 0.25) {
+      e.stun += 1;
+      float(e.x, e.y - 12, "stun!", "#7fd0ff");
     }
+    if (e.hp <= 0) killEnemy(e);
+  };
+
+  const applyDotTick = (e: Enemy) => {
+    const hadBurn = e.burn > 0;
+    let dmg = 0;
+    if (e.poison > 0) { dmg += e.poison; e.poison -= 1; }
+    if (e.burn > 0) { dmg += e.burn + 1; e.burn -= 1; } // burn bites a little harder
+    if (dmg <= 0) return;
+    e.hp -= dmg;
+    const col = hadBurn ? "#ff8a3a" : "#8be08b";
+    float(e.x, e.y, `-${dmg}`, col);
+    spawnSparks(e.x + 12, e.y + 10, col, 5);
+    if (e.hp <= 0) killEnemy(e);
+  };
+
+  /** Tick poison + burn on all afflicted enemies (start of the enemy phase). */
+  const tickEnemyDots = () => {
+    for (const e of enemiesRef.current) {
+      if (!e.dead && (e.poison > 0 || e.burn > 0)) applyDotTick(e);
+    }
+  };
+
+  /** Apply one incoming hit to the hero (shield + defend reductions, status riders). */
+  const heroTakeHit = (raw: number, label: string, opts?: { poison?: number; burn?: number }) => {
+    const afterShield = Math.max(1, raw - defRef.current);
+    const dmg = defendRef.current ? Math.max(1, Math.ceil(afterShield / 2)) : afterShield;
+    hpRef.current = Math.max(0, hpRef.current - dmg);
+    heroRef.current.hitFlash = 220; heroRef.current.xOff = -14;
+    float(HERO_X, HERO_Y, `-${dmg}`, "#ff4d4d");
+    spawnSparks(HERO_X + 12, HERO_Y + 12, "#ff6b6b", 7);
+    shake(dmg >= 6 ? 7 : 4); playSfx("hurt");
+    onEventRef.current({ hpDelta: -dmg });
+    const blocked = defendRef.current || defRef.current > 0;
+    let extra = "";
+    if (opts?.poison) { heroPoisonRef.current += opts.poison; extra += " · poisoned"; }
+    if (opts?.burn) { heroBurnRef.current += opts.burn; extra += " · burning"; }
+    pushLog(`${label} for ${dmg}${blocked ? " (reduced)" : ""}${extra}.`);
   };
 
   const enemyTurn = useCallback(async () => {
     const alive = () => enemiesRef.current.filter((e) => !e.dead);
+    const dead = () => { setTurn("over"); playSfx("death"); pushLog("You have fallen…"); };
 
-    // 1) poison ticks on poisoned enemies (may clear the wave outright)
-    if (enemiesRef.current.some((e) => !e.dead && e.poison > 0)) {
-      tickEnemyPoison();
+    // 1) poison + burn ticks (may clear the wave outright)
+    if (enemiesRef.current.some((e) => !e.dead && (e.poison > 0 || e.burn > 0))) {
+      tickEnemyDots();
       refreshView();
       await sleep(260);
     }
 
-    // 2) surviving enemies attack
+    // 2) surviving enemies act
     for (const e of alive()) {
-      await sleep(240);
-      e.xOff = -22; e.hitFlash = 60;
-      await sleep(140);
-      // Shield reduces each hit by defBonus (min 1); Defend then halves what's left.
-      const afterShield = Math.max(1, e.dmg - defRef.current);
-      const dmg = defendRef.current ? Math.max(1, Math.ceil(afterShield / 2)) : afterShield;
-      hpRef.current = Math.max(0, hpRef.current - dmg);
-      heroRef.current.hitFlash = 220; heroRef.current.xOff = -14;
-      float(HERO_X, HERO_Y, `-${dmg}`, "#ff4d4d");
-      spawnSparks(HERO_X + 12, HERO_Y + 12, "#ff6b6b", 7);
-      shake(dmg >= 6 ? 7 : 4); playSfx("hurt");
-      onEventRef.current({ hpDelta: -dmg });
-      const blocked = defendRef.current || defRef.current > 0;
-      let extra = "";
-      if (e.kind === "slime") { heroPoisonRef.current += 1; extra = " · poisoned"; }
-      pushLog(`${e.name} hits you for ${dmg}${blocked ? " (reduced)" : ""}${extra}.`);
+      await sleep(200);
+
+      // Stunned → lose the turn.
+      if (e.stun > 0) {
+        e.stun -= 1;
+        float(e.x, e.y - 8, "stunned", "#7fd0ff");
+        refreshView(); await sleep(150);
+        continue;
+      }
+
+      // Boss second phase below half HP.
+      if (e.boss && !e.enraged && e.hp <= e.maxHp / 2) {
+        e.enraged = true; e.dmg = Math.round(e.dmg * 1.4);
+        float(e.x, e.y - 14, "ENRAGED", "#ff5a4a"); shake(9); playSfx("boss");
+        pushLog(`${e.name} enrages — its blows grow heavier!`);
+        refreshView(); await sleep(280);
+      }
+
+      // Execute a telegraphed special.
+      if (e.windup > 0) {
+        e.windup = 0;
+        e.xOff = -28; e.hitFlash = 60; await sleep(150);
+        if (e.kind === "wraith") {
+          heroTakeHit(e.dmg, `${e.name} drains your life`);
+          const heal = Math.min(e.maxHp - e.hp, e.dmg);
+          if (heal > 0) { e.hp += heal; float(e.x, e.y - 6, `+${heal}`, "#a06bff"); }
+        } else if (e.kind === "imp") {
+          heroTakeHit(Math.ceil(e.dmg * 0.7), `${e.name} flurries`);
+          if (hpRef.current > 0) { await sleep(120); heroTakeHit(Math.ceil(e.dmg * 0.7), `${e.name} strikes again`); }
+        } else {
+          const burn = e.boss && e.enraged ? 3 : 0;
+          heroTakeHit(e.dmg * 2, `${e.name} lands a heavy blow`, { burn });
+        }
+        refreshView(); await sleep(120);
+        if (hpRef.current <= 0) return dead();
+        continue;
+      }
+
+      // Maybe telegraph a special instead of attacking this turn.
+      const hasSpecial = e.boss || e.kind === "skeleton" || e.kind === "wraith" || e.kind === "imp";
+      if (hasSpecial && Math.random() < (e.boss ? 0.45 : 0.3)) {
+        e.windup = 1;
+        float(e.x, e.y - 10, "⚡", "#ffd84a");
+        pushLog(`${e.name} winds up a ${e.boss ? "devastating" : "heavy"} attack…`);
+        refreshView(); await sleep(180);
+        continue;
+      }
+
+      // Normal attack (slimes leave poison).
+      e.xOff = -22; e.hitFlash = 60; await sleep(140);
+      heroTakeHit(e.dmg, `${e.name} hits you`, { poison: e.kind === "slime" ? 1 : 0 });
       await sleep(110);
-      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You have fallen…"); return; }
+      if (hpRef.current <= 0) return dead();
     }
 
-    // 3) hero poison tick
-    if (heroPoisonRef.current > 0) {
-      const dmg = heroPoisonRef.current;
-      hpRef.current = Math.max(0, hpRef.current - dmg);
-      heroPoisonRef.current -= 1;
-      float(HERO_X, HERO_Y - 6, `-${dmg}`, "#8be08b");
-      onEventRef.current({ hpDelta: -dmg });
-      pushLog(`Poison courses through you (-${dmg}).`);
-      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You succumb to poison…"); return; }
+    // 3) hero poison + burn tick
+    const burning = heroBurnRef.current > 0;
+    const dot = heroPoisonRef.current + (burning ? heroBurnRef.current + 1 : 0);
+    if (dot > 0) {
+      hpRef.current = Math.max(0, hpRef.current - dot);
+      if (heroPoisonRef.current > 0) heroPoisonRef.current -= 1;
+      if (heroBurnRef.current > 0) heroBurnRef.current -= 1;
+      float(HERO_X, HERO_Y - 6, `-${dot}`, burning ? "#ff8a3a" : "#8be08b");
+      onEventRef.current({ hpDelta: -dot });
+      pushLog(`${burning ? "Flames sear you" : "Poison courses through you"} (-${dot}).`);
+      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You succumb…"); return; }
     }
 
     defendRef.current = false;
@@ -614,6 +696,15 @@ export default function PixelStage({
     setTurn("busy");
     heroRef.current.xOff = 26; heroRef.current.atkFlash = 200;
     await sleep(160);
+    // Bats are evasive.
+    if (target.kind === "bat" && Math.random() < 0.22) {
+      float(target.x, target.y - 4, "miss", "#cfcad9");
+      pushLog(`The ${target.name} flits aside — you miss!`);
+      refreshView();
+      await sleep(220);
+      await enemyTurn();
+      return;
+    }
     const crit = Math.random() < critChance();
     const dmg = crit ? heroDamage() * 2 : heroDamage();
     hitEnemy(target, dmg, crit);
@@ -639,15 +730,22 @@ export default function PixelStage({
     pushLog(`You unleash ${sk}!${crit ? " CRIT!" : ""}`);
     shake(crit ? 6 : 4);
     await sleep(180);
-    if (klass === "Warrior" || klass === "Ranger") {
-      const mult = klass === "Warrior" ? 1 : 0.7;
-      for (const t of targets) hitEnemy(t, Math.max(1, Math.round(atk * mult * cm)), crit);
+    if (klass === "Warrior") {
+      for (const t of targets) {
+        hitEnemy(t, Math.max(1, Math.round(atk * cm)), crit);
+        if (!t.dead) { t.stun += 1; float(t.x, t.y - 12, "stun!", "#7fd0ff"); }
+      }
+    } else if (klass === "Ranger") {
+      for (const t of targets) hitEnemy(t, Math.max(1, Math.round(atk * 0.7 * cm)), crit);
     } else if (klass === "Mage") {
-      hitEnemy(targets.find((t) => t.id === selected) ?? targets[0], Math.round(atk * 2 * cm), crit);
+      const tgt = targets.find((t) => t.id === selected) ?? targets[0];
+      hitEnemy(tgt, Math.round(atk * 2 * cm), crit);
+      if (!tgt.dead) { tgt.burn += 3; float(tgt.x, tgt.y - 12, "🔥burn", "#ff8a3a"); }
     } else {
       const tgt = targets.find((t) => t.id === selected) ?? targets[0];
       hitEnemy(tgt, atk * cm, crit);
       if (!tgt.dead) { await sleep(140); hitEnemy(tgt, atk * cm, crit); }
+      if (!tgt.dead) { tgt.poison += 3; float(tgt.x, tgt.y - 12, "☠pois", "#8be08b"); }
     }
     refreshView();
     await sleep(240);
@@ -716,6 +814,10 @@ export default function PixelStage({
             >
               {e.boss ? "☠ " : ""}{e.name} {e.hp}/{e.maxHp}
               {e.poison > 0 && <span className="ml-1 text-emerald-300">☣{e.poison}</span>}
+              {e.burn > 0 && <span className="ml-1 text-orange-300">🔥{e.burn}</span>}
+              {e.stun > 0 && <span className="ml-1 text-sky-300">💫{e.stun}</span>}
+              {e.windup > 0 && <span className="ml-1 text-amber-300">⚡</span>}
+              {e.enraged && <span className="ml-1 text-red-300">😡</span>}
             </button>
           ))}
         </div>
