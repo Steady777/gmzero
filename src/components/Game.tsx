@@ -126,6 +126,27 @@ function isUserRejection(e: unknown): boolean {
   return code === 4001 || code === "ACTION_REJECTED";
 }
 
+/**
+ * Parse a fetch Response as JSON. Turns non-JSON bodies (Vercel/Next HTML error
+ * pages, gateway timeouts) into a clean message instead of the cryptic
+ * "Unexpected token '<' ... is not valid JSON" that `res.json()` throws on HTML.
+ */
+async function readJson(res: Response, fallback: string): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    if (text) data = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    if (res.status === 504 || res.status === 408 || res.status === 503) {
+      throw new Error("The server took too long — live 0G inference can be slow on the first turn. Please try again.");
+    }
+    if (res.status === 429) throw new Error("Too many requests — slow down a moment and retry.");
+    throw new Error(`Server returned an unexpected response (${res.status}). Please try again.`);
+  }
+  if (!res.ok) throw new Error((data.error as string) ?? `${fallback} (${res.status})`);
+  return data;
+}
+
 function normalizeState(s: GameState): GameState {
   const c = s.character;
   // Backfill hp/maxHp defensively — a malformed external save with a missing
@@ -410,8 +431,7 @@ export default function Game() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state: current, action: actionText }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "GM failed");
+      const data = await readJson(res, "GM failed");
       setState({
         ...current,
         character: data.character as Character,
@@ -474,10 +494,9 @@ export default function Game() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Save failed");
-      setLastSave({ rootHash: data.rootHash, txHash: data.txHash, explorerUrl: data.explorerUrl });
-      setState({ ...state, prevRootHash: data.rootHash });
+      const data = await readJson(res, "Save failed");
+      setLastSave({ rootHash: data.rootHash as string, txHash: data.txHash as string | null, explorerUrl: data.explorerUrl as string | null });
+      setState({ ...state, prevRootHash: data.rootHash as string });
       // If this run is already on the leaderboard, attach its 0G root hash.
       if (lastRunIdRef.current) {
         setBoard((prev) => {
@@ -508,8 +527,7 @@ export default function Game() {
     setError(null);
     try {
       const res = await fetch(`/api/load?rootHash=${encodeURIComponent(hash)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Load failed");
+      const data = await readJson(res, "Load failed");
       // Loaded saves are normal runs — clear any stale daily-run flag so the
       // leaderboard entry isn't mislabeled as a daily challenge.
       isDailyRef.current = false;
@@ -648,8 +666,7 @@ export default function Game() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item: name, seed: stateRef.current?.seed ?? "", owner }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? "Mint failed");
+    const data = await readJson(res, "Mint failed");
     return data.mint as MintInfo;
   }
 
@@ -704,8 +721,7 @@ export default function Game() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ item: name, price, seed: stateRef.current?.seed ?? "", seller }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Sale failed");
+        const data = await readJson(res, "Sale failed");
         return data.sale as SaleInfo;
       };
       if (wallet) {
@@ -771,8 +787,9 @@ export default function Game() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state: cur, summary }),
       });
-      const data = await res.json();
       if (!res.ok) return; // best-effort: a failed recap shouldn't interrupt play
+      const data = await res.json().catch(() => null);
+      if (!data?.entry) return;
       setState((prev) =>
         prev ? { ...prev, log: [...prev.log, data.entry as LogEntry], updatedAt: new Date().toISOString() } : prev,
       );

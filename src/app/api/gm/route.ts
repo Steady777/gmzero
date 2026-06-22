@@ -15,6 +15,9 @@ import { enforceRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Live 0G inference (first turn: ledger create + provider ack/fund + TEE verify)
+// can exceed the default function timeout; without this it returns an HTML 504.
+export const maxDuration = 60;
 
 /** Max player-action length sent to (paid) inference. Keeps cost + prompt-injection surface bounded. */
 const MAX_ACTION_LEN = 280;

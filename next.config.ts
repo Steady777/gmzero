@@ -5,7 +5,6 @@ const nextConfig: NextConfig = {
   serverExternalPackages: [
     "@0gfoundation/0g-compute-ts-sdk",
     "@0gfoundation/0g-ts-sdk",
-    "circomlibjs",
   ],
 };
 

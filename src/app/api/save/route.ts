@@ -6,6 +6,7 @@ import { enforceRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // 0G Storage upload can be slow; avoid HTML 504s
 
 /** Reject oversized save payloads (a normal save is a few KB). */
 const MAX_BODY_BYTES = 128 * 1024;

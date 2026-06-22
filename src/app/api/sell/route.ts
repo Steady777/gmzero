@@ -4,6 +4,7 @@ import { enforceRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // on-chain tx confirmation can be slow; avoid HTML 504s
 
 /** Hard cap on recorded sale price to keep on-chain data sane. */
 const MAX_PRICE = 1_000_000_000;

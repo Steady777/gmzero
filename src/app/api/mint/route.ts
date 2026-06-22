@@ -4,6 +4,7 @@ import { enforceRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // on-chain tx confirmation can be slow; avoid HTML 504s
 
 /** Mint a piece of loot as an on-chain ownership record on 0G Chain. */
 export async function POST(req: Request) {

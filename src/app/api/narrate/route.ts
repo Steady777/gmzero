@@ -6,6 +6,7 @@ import { enforceRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // live 0G inference can be slow; avoid HTML 504s
 
 const MAX_SUMMARY_LEN = 600;
 
