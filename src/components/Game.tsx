@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import PixelStage, { type CombatEvent } from "@/components/PixelStage";
+import { connectWallet, mintItemWithWallet, sellItemWithWallet, shortAddr } from "@/lib/wallet";
 import {
   atkOf,
   critOf,
@@ -146,6 +147,8 @@ export default function Game() {
   const [minting, setMinting] = useState<string | null>(null);
   const [selling, setSelling] = useState<string | null>(null);
   const [lastSale, setLastSale] = useState<SaleInfo | null>(null);
+  const [wallet, setWallet] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [board, setBoard] = useState<RunEntry[]>([]);
   const lastRunIdRef = useRef<string | null>(null);
   const recordedRef = useRef(false);
@@ -334,20 +337,43 @@ export default function Game() {
     });
   }
 
-  /** Mint a piece of loot as an on-chain ownership record on 0G Chain. */
+  async function onConnectWallet() {
+    if (connecting) return;
+    setConnecting(true);
+    setError(null);
+    try {
+      const { address } = await connectWallet();
+      setWallet(address);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wallet connection failed");
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  /**
+   * Mint loot on 0G Chain. If a wallet is connected, the *player* signs and owns
+   * it; otherwise the server key (or mock) records it.
+   */
   async function mintLoot(name: string) {
     if (minting) return;
     setMinting(name);
     setError(null);
     try {
-      const res = await fetch("/api/mint", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ item: name, seed: stateRef.current?.seed ?? "" }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Mint failed");
-      setMints((m) => ({ ...m, [name]: data.mint as MintInfo }));
+      let mint: MintInfo;
+      if (wallet) {
+        mint = await mintItemWithWallet(name, stateRef.current?.seed ?? "");
+      } else {
+        const res = await fetch("/api/mint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item: name, seed: stateRef.current?.seed ?? "" }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Mint failed");
+        mint = data.mint as MintInfo;
+      }
+      setMints((m) => ({ ...m, [name]: mint }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Mint failed");
     } finally {
@@ -362,14 +388,20 @@ export default function Game() {
     setSelling(name);
     setError(null);
     try {
-      const res = await fetch("/api/sell", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ item: name, price, seed: stateRef.current?.seed ?? "" }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Sale failed");
-      setLastSale(data.sale as SaleInfo);
+      let sale: SaleInfo;
+      if (wallet) {
+        sale = await sellItemWithWallet(name, price, stateRef.current?.seed ?? "");
+      } else {
+        const res = await fetch("/api/sell", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item: name, price, seed: stateRef.current?.seed ?? "" }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Sale failed");
+        sale = data.sale as SaleInfo;
+      }
+      setLastSale(sale);
       setState((prev) => {
         if (!prev) return prev;
         const c = { ...prev.character, inventory: [...prev.character.inventory], equipped: { ...prev.character.equipped } };
@@ -465,7 +497,7 @@ export default function Game() {
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6">
-      <Header status={status} />
+      <Header status={status} wallet={wallet} connecting={connecting} onConnect={onConnectWallet} />
 
       {error && (
         <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-200">
@@ -778,7 +810,17 @@ function ShopModal({
   );
 }
 
-function Header({ status }: { status: Status | null }) {
+function Header({
+  status,
+  wallet,
+  connecting,
+  onConnect,
+}: {
+  status: Status | null;
+  wallet: string | null;
+  connecting: boolean;
+  onConnect: () => void;
+}) {
   const live = status?.mode === "live";
   return (
     <header className="flex flex-wrap items-center justify-between gap-3">
@@ -799,10 +841,22 @@ function Header({ status }: { status: Status | null }) {
         >
           {live ? "● LIVE on 0G" : "● MOCK mode"}
         </span>
-        {status && (
-          <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-white/50">
-            chain {status.chainId}
+        {wallet ? (
+          <span
+            className="rounded-full bg-violet-500/15 px-3 py-1 text-xs font-medium text-violet-200 ring-1 ring-violet-400/40"
+            title={`Connected — loot you mint/sell is owned by ${wallet}`}
+          >
+            🔗 {shortAddr(wallet)}
           </span>
+        ) : (
+          <button
+            onClick={onConnect}
+            disabled={connecting}
+            className="rounded-full bg-violet-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-violet-500 disabled:opacity-50"
+            title="Connect a wallet to mint & trade loot as your own on-chain assets"
+          >
+            {connecting ? "Connecting…" : "Connect wallet"}
+          </button>
         )}
       </div>
     </header>
