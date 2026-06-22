@@ -83,6 +83,43 @@ function normalizeState(s: GameState): GameState {
   };
 }
 
+interface RunEntry {
+  id: string;
+  name: string;
+  klass: Character["klass"];
+  depth: number;
+  gold: number;
+  outcome: GameStatus;
+  date: string;
+  rootHash?: string;
+  explorerUrl?: string | null;
+}
+
+const BOARD_KEY = "gmzero.leaderboard";
+
+function loadBoard(): RunEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const b = JSON.parse(localStorage.getItem(BOARD_KEY) ?? "[]") as RunEntry[];
+    return Array.isArray(b) ? b : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Insert a run, keep the top 10 by depth then gold. */
+function persistRun(entry: RunEntry): RunEntry[] {
+  const next = [...loadBoard(), entry]
+    .sort((a, b) => b.depth - a.depth || b.gold - a.gold)
+    .slice(0, 10);
+  try {
+    localStorage.setItem(BOARD_KEY, JSON.stringify(next));
+  } catch {
+    // storage may be unavailable (private mode) — leaderboard is best-effort
+  }
+  return next;
+}
+
 export default function Game() {
   const [status, setStatus] = useState<Status | null>(null);
   const [state, setState] = useState<GameState | null>(null);
@@ -102,6 +139,9 @@ export default function Game() {
   const [shop, setShop] = useState(false);
   const [mints, setMints] = useState<Record<string, MintInfo>>({});
   const [minting, setMinting] = useState<string | null>(null);
+  const [board, setBoard] = useState<RunEntry[]>([]);
+  const lastRunIdRef = useRef<string | null>(null);
+  const recordedRef = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
   // Latest state for async callbacks (combat runs outside React's render cycle).
   const stateRef = useRef<GameState | null>(state);
@@ -114,7 +154,32 @@ export default function Game() {
       .then((r) => r.json())
       .then(setStatus)
       .catch(() => setStatus({ mode: "mock", chainId: 16602, explorer: "", storageExplorer: "" }));
+    // Read the leaderboard from localStorage after mount (avoids SSR hydration mismatch).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBoard(loadBoard());
   }, []);
+
+  // Record a run to the local leaderboard once it ends (defeat/victory).
+  useEffect(() => {
+    if (!state) return;
+    if (state.status !== "playing" && !recordedRef.current) {
+      recordedRef.current = true;
+      const id = `run-${Date.now()}`;
+      lastRunIdRef.current = id;
+      setBoard(
+        persistRun({
+          id,
+          name: state.character.name,
+          klass: state.character.klass,
+          depth: state.depth,
+          gold: state.character.gold,
+          outcome: state.status,
+          date: new Date().toISOString(),
+        }),
+      );
+    }
+    if (state.status === "playing") recordedRef.current = false;
+  }, [state]);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
@@ -174,6 +239,22 @@ export default function Game() {
       if (!res.ok) throw new Error(data.error ?? "Save failed");
       setLastSave({ rootHash: data.rootHash, txHash: data.txHash, explorerUrl: data.explorerUrl });
       setState({ ...state, prevRootHash: data.rootHash });
+      // If this run is already on the leaderboard, attach its 0G root hash.
+      if (lastRunIdRef.current) {
+        setBoard((prev) => {
+          const next = prev.map((e) =>
+            e.id === lastRunIdRef.current
+              ? { ...e, rootHash: data.rootHash as string, explorerUrl: data.explorerUrl as string | null }
+              : e,
+          );
+          try {
+            localStorage.setItem(BOARD_KEY, JSON.stringify(next));
+          } catch {
+            /* best-effort */
+          }
+          return next;
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -181,12 +262,13 @@ export default function Game() {
     }
   }
 
-  async function loadFromOg() {
-    if (!loadHash.trim() || busy) return;
+  async function loadFromOg(hashArg?: string) {
+    const hash = (typeof hashArg === "string" ? hashArg : loadHash).trim();
+    if (!hash || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/load?rootHash=${encodeURIComponent(loadHash.trim())}`);
+      const res = await fetch(`/api/load?rootHash=${encodeURIComponent(hash)}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Load failed");
       setState(normalizeState(data.state as GameState));
@@ -331,17 +413,20 @@ export default function Game() {
       )}
 
       {!state ? (
-        <NewGame
-          name={name}
-          setName={setName}
-          klass={klass}
-          setKlass={setKlass}
-          loadHash={loadHash}
-          setLoadHash={setLoadHash}
-          onStart={startAdventure}
-          onLoad={loadFromOg}
-          busy={busy}
-        />
+        <>
+          <NewGame
+            name={name}
+            setName={setName}
+            klass={klass}
+            setKlass={setKlass}
+            loadHash={loadHash}
+            setLoadHash={setLoadHash}
+            onStart={startAdventure}
+            onLoad={loadFromOg}
+            busy={busy}
+          />
+          {board.length > 0 && <Leaderboard board={board} onLoad={(h) => void loadFromOg(h)} />}
+        </>
       ) : (
         <div className="mt-6 grid gap-5 md:grid-cols-[1fr_280px]">
           <main className="flex flex-col">
@@ -703,6 +788,44 @@ function EndBanner({ status, onRestart }: { status: GameStatus; onRestart: () =>
       >
         New adventure
       </button>
+    </div>
+  );
+}
+
+function Leaderboard({ board, onLoad }: { board: RunEntry[]; onLoad: (rootHash: string) => void }) {
+  return (
+    <div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold">🏆 Deepest runs</h2>
+        <span className="text-xs text-white/40">stored locally · &ldquo;Save adventure&rdquo; publishes a run to 0G</span>
+      </div>
+      <ol className="mt-3 space-y-1.5">
+        {board.map((r, i) => (
+          <li key={r.id} className="flex items-center gap-3 rounded-lg bg-white/5 px-3 py-2 text-sm">
+            <span className="w-5 text-center font-mono text-white/40">{i + 1}</span>
+            <span className="min-w-0 flex-1 truncate">
+              <span className="text-white/90">{r.name}</span>
+              <span className="text-white/40"> · {r.klass}</span>
+            </span>
+            <span className="font-mono text-amber-300" title="depth reached">⛏{r.depth}</span>
+            <span className="font-mono text-white/50">{r.gold}⛀</span>
+            <span title={r.outcome} className={r.outcome === "victory" ? "text-amber-300" : "text-red-300/70"}>
+              {r.outcome === "victory" ? "★" : "☠"}
+            </span>
+            {r.rootHash ? (
+              <button
+                onClick={() => onLoad(r.rootHash!)}
+                title={`Load this run from 0G (${r.rootHash})`}
+                className="rounded bg-violet-600/60 px-2 py-0.5 text-[11px] text-white hover:bg-violet-500"
+              >
+                load ↺
+              </button>
+            ) : (
+              <span className="text-[11px] text-white/25" title="not yet published to 0G">local</span>
+            )}
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

@@ -35,6 +35,35 @@ const SKELETON = [
   "....WWWWWWWW....", "...WWWWWWWWWW...", "...WW.WWWW.WW...", "...WWWWWWWWWW...",
   "....WW.WW.WW....", "....WW....WW....", "...WWW....WWW...", "................",
 ];
+const IMP = [
+  "................", "..R..........R..", "..RR........RR..", "...RRRRRRRRRR...",
+  "..RRRRRRRRRRRR..", "..RRYYRRRRYYRR..", "..RRRRRRRRRRRR..", "..RRRWWWWWWRRR..",
+  "...RRRRRRRRRR...", "....RRRRRRRR....", "...RR.RRRR.RR...", "..RR...RR...RR..",
+  "................", "................", "................", "................",
+];
+const WRAITH = [
+  "................", ".....VVVV.......", "...VVVVVVVV.....", "..VVVVVVVVVV....",
+  "..VVWWVVWWVV....", "..VVVVVVVVVV....", "..VVVVVVVVVV....", "..VVVVVVVVVV....",
+  "..VVVVVVVVVV....", "...VVVVVVVV.....", "...V.VV.VV.V....", "....V.V.V.V.....",
+  "................", "................", "................", "................",
+];
+// Dedicated boss sprites (rendered at 2x).
+const BONE_TYRANT = [
+  "......KKKK......", "....K.KKKK.K....", "....KKKKKKKK....", "...WWWWWWWWWW...",
+  "..WWWWWWWWWWWW..", "..WWEEWWWWEEWW..", "..WWEEWWWWEEWW..", "..WWWWWNNWWWWW..",
+  "..WWWWWWWWWWWW..", "..WWWWWWWWWWWW..", "...WW.WWWW.WW...", "..WWWWWWWWWWWW..",
+  ".WWW.WWWW.WWWW..", "..WW......WW....", "................", "................",
+];
+const WYRM_WARDEN = [
+  "......AAAA......", ".....AAAAAA.....", "....AARRRRAA....", "....AAAAAAAA....",
+  "...AAAAAAAAAA...", "..AAAAAAAAAAAA..", "..AAACCCCAAAA...", "..AAAAAAAAAAAA..",
+  "..AAAAAAAAAAAA..", "..AAAA.AAAA.A...", "...AAAAAAAAAA...", "..AAA.AAAA.AAA..",
+  "..AA...AA...AA..", "................", "................", "................",
+];
+const BOSS_SPRITES: Record<string, { map: string[]; pal: Record<string, string | null> }> = {
+  "Bone Tyrant": { map: BONE_TYRANT, pal: { ".": null, W: "#e8e6d8", E: "#ff5a4a", N: "#3a2f28", K: "#ffc24a" } },
+  "Wyrm Warden": { map: WYRM_WARDEN, pal: { ".": null, A: "#8893a6", R: "#ff5a4a", C: "#4fe0d0" } },
+};
 
 const TUNIC: Record<Character["klass"], string> = {
   Warrior: "#b5483f", Mage: "#5b6ee0", Rogue: "#3f9e6b", Ranger: "#caa24a",
@@ -46,7 +75,7 @@ function heroPalette(klass: Character["klass"]): Record<string, string | null> {
   };
 }
 
-type Kind = "slime" | "bat" | "skeleton";
+type Kind = "slime" | "bat" | "skeleton" | "imp" | "wraith";
 interface MobDef {
   name: string;
   map: string[];
@@ -71,7 +100,26 @@ const MOBS: Record<Kind, MobDef> = {
     hp: 13, dmg: 5, gold: [8, 16],
     drops: [{ name: "Bone Cleaver", rarity: "epic", chance: 0.35 }, { name: "Cracked Shield", rarity: "rare", chance: 0.4 }],
   },
+  imp: {
+    name: "Imp", map: IMP, pal: { ".": null, R: "#c2452f", Y: "#ffd23f", W: "#f3e9d2" },
+    hp: 6, dmg: 4, gold: [4, 9],
+    drops: [{ name: "Enchanted Dagger", rarity: "epic", chance: 0.18 }, { name: "Imp Horn", rarity: "rare", chance: 0.3 }],
+  },
+  wraith: {
+    name: "Wraith", map: WRAITH, pal: { ".": null, V: "#7a5cc0", W: "#e8e0ff" },
+    hp: 11, dmg: 4, gold: [6, 13],
+    drops: [{ name: "Spectral Vial", rarity: "epic", chance: 0.25 }, { name: "Silver Ring", rarity: "epic", chance: 0.15 }],
+  },
 };
+
+/** Floor-themed backdrop palettes; deeper floors look colder/darker. */
+const FLOOR_THEMES = [
+  { top: "#221b30", bottom: "#15111d", band: "#1c1726", stripe: "#2a2238", torch: ["#ffb648", "#ff8a2a"] },
+  { top: "#16242b", bottom: "#0f181d", band: "#16242b", stripe: "#1f3540", torch: ["#5fe0d0", "#2aa6b8"] },
+  { top: "#2a1822", bottom: "#180d14", band: "#241019", stripe: "#3a1b28", torch: ["#ff7a9c", "#d23a6a"] },
+  { top: "#1d1a2e", bottom: "#0e0c18", band: "#171430", stripe: "#231f44", torch: ["#9a7bff", "#5c3ac0"] },
+];
+const floorTheme = (floor: number) => FLOOR_THEMES[(floor - 1) % FLOOR_THEMES.length];
 
 const RARITY_COLOR: Record<Rarity, string> = {
   common: "#cfcad9", rare: "#5fb6ff", epic: "#d479ff", legendary: "#ffc24a",
@@ -116,6 +164,9 @@ interface Enemy {
   poison: number;
   /** Guaranteed drop for bosses (overrides the random drop table). */
   bossDrop?: { name: string; rarity: Rarity };
+  /** Override sprite (bosses use a dedicated, larger sprite). */
+  spriteMap?: string[];
+  spritePal?: Record<string, string | null>;
 }
 interface FloatTxt { x: number; y: number; vy: number; life: number; text: string; color: string; }
 interface Spark { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; }
@@ -258,16 +309,24 @@ export default function PixelStage({
     if (isBoss) {
       const b = BOSSES[Math.min(BOSSES.length - 1, Math.floor((floorN - 1) / 2))];
       const hp = Math.round(MOBS[b.kind].hp * b.hpMult * m);
+      const sprite = BOSS_SPRITES[b.name];
       list.push({
         id: idRef.current++, kind: b.kind, name: b.name, hp, maxHp: hp,
         x: ENEMY_X - 6, y: ENEMY_SLOTS[1], xOff: 0, hitFlash: 0, dead: false, deadT: 0,
         dmg: Math.round(b.dmg * m), gold: [Math.round(b.gold[0] * m), Math.round(b.gold[1] * m)],
         boss: true, poison: 0, bossDrop: b.drop,
+        spriteMap: sprite?.map, spritePal: sprite?.pal,
       });
       pushLog(`⚠ The floor ${floorN} guardian appears: ${b.name}!`);
       shake(7); playSfx("boss");
     } else {
-      const kinds: Kind[] = ["slime", "slime", "bat", "skeleton"];
+      // Deeper floors introduce tougher variety into the pool.
+      const kinds: Kind[] =
+        floorN >= 3
+          ? ["slime", "bat", "skeleton", "imp", "wraith", "skeleton"]
+          : floorN === 2
+            ? ["slime", "slime", "bat", "skeleton", "imp"]
+            : ["slime", "slime", "bat", "skeleton"];
       const count = 1 + ((Math.random() * 3) | 0); // 1..3
       for (let i = 0; i < count; i++) {
         const kind = kinds[(Math.random() * kinds.length) | 0];
@@ -337,19 +396,24 @@ export default function PixelStage({
       ctx.save();
       ctx.translate(Math.round(sox), Math.round(soy));
 
-      // backdrop (oversized so shake never reveals the canvas edge)
+      // backdrop (oversized so shake never reveals the canvas edge); theme shifts by floor
+      const theme = floorTheme(floorRef.current);
       const grad = ctx.createLinearGradient(0, 0, 0, H);
-      grad.addColorStop(0, "#221b30"); grad.addColorStop(1, "#15111d");
+      grad.addColorStop(0, theme.top); grad.addColorStop(1, theme.bottom);
       ctx.fillStyle = grad; ctx.fillRect(-12, -12, W + 24, H + 24);
+      // distant pillars (parallax depth)
+      ctx.fillStyle = "rgba(255,255,255,0.03)";
+      for (let x = 24; x < W; x += 80) ctx.fillRect(x, 40, 18, 128);
       // floor band
-      ctx.fillStyle = "#1c1726"; ctx.fillRect(0, 168, W, H - 168);
-      ctx.fillStyle = "#2a2238";
+      ctx.fillStyle = theme.band; ctx.fillRect(0, 168, W, H - 168);
+      ctx.fillStyle = theme.stripe;
       for (let x = 0; x < W; x += 32) ctx.fillRect(x, 168, 30, 3);
       // torches
-      const flick = Math.sin(anim / 120) > 0 ? "#ffb648" : "#ff8a2a";
+      const flick = Math.sin(anim / 120) > 0 ? theme.torch[0] : theme.torch[1];
       for (const x of [40, W - 48]) {
         ctx.fillStyle = "#0f0b16"; ctx.fillRect(x, 26, 6, 14);
         ctx.fillStyle = flick; ctx.fillRect(x - 1, 18, 8, 8);
+        ctx.fillStyle = "rgba(255,200,120,0.06)"; ctx.fillRect(x - 6, 12, 18, 28);
       }
 
       // enemies
@@ -366,7 +430,9 @@ export default function PixelStage({
         const w = SPRITE * scale, barW = e.boss ? 44 : 24;
         ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fillRect(ex + w / 2 - 10, e.y + 30, 20, 4);
         const tint = e.hitFlash > 0 ? "#ffffff" : e.boss ? "#ffd1d1" : undefined;
-        drawPix(MOBS[e.kind].map, MOBS[e.kind].pal, ex, ey, true, tint, alpha, scale);
+        const map = e.spriteMap ?? MOBS[e.kind].map;
+        const pal = e.spritePal ?? MOBS[e.kind].pal;
+        drawPix(map, pal, ex, ey, true, tint, alpha, scale);
         if (!e.dead && e.hp < e.maxHp) {
           const barX = ex + w / 2 - barW / 2;
           ctx.fillStyle = "#000"; ctx.fillRect(barX, ey - 6, barW, 3);
