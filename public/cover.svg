@@ -1,0 +1,98 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="GMZero — Verifiable AI Game Master on 0G">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="630" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#221b30"/>
+      <stop offset="1" stop-color="#100c18"/>
+    </linearGradient>
+    <linearGradient id="die" x1="190" y1="200" x2="410" y2="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#6d28d9"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="torch" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffb648" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ffb648" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <!-- distant pillars -->
+  <g fill="#ffffff" opacity="0.025">
+    <rect x="120" y="120" width="40" height="380"/>
+    <rect x="320" y="120" width="40" height="380"/>
+    <rect x="840" y="120" width="40" height="380"/>
+    <rect x="1040" y="120" width="40" height="380"/>
+  </g>
+  <!-- torch glows -->
+  <circle cx="120" cy="120" r="160" fill="url(#torch)"/>
+  <circle cx="1080" cy="120" r="160" fill="url(#torch)"/>
+  <circle cx="300" cy="315" r="300" fill="url(#glow)"/>
+  <!-- floor band (matches in-game) -->
+  <rect x="0" y="520" width="1200" height="110" fill="#1a1626"/>
+  <g fill="#2a2238">
+    <rect x="40" y="520" width="60" height="6"/><rect x="140" y="520" width="60" height="6"/>
+    <rect x="240" y="520" width="60" height="6"/><rect x="340" y="520" width="60" height="6"/>
+    <rect x="440" y="520" width="60" height="6"/><rect x="540" y="520" width="60" height="6"/>
+    <rect x="640" y="520" width="60" height="6"/><rect x="740" y="520" width="60" height="6"/>
+    <rect x="840" y="520" width="60" height="6"/><rect x="940" y="520" width="60" height="6"/>
+    <rect x="1040" y="520" width="60" height="6"/>
+  </g>
+
+  <!-- d20 die: the verifiable roll -->
+  <g transform="translate(300 312)" stroke="#e9e2ff" stroke-width="3" stroke-linejoin="round">
+    <!-- shadow -->
+    <ellipse cx="0" cy="170" rx="78" ry="14" fill="#000000" opacity="0.35" stroke="none"/>
+    <!-- outer hexagon -->
+    <polygon points="0,-150 130,-75 130,75 0,150 -130,75 -130,-75" fill="url(#die)"/>
+    <!-- facet lines -->
+    <g stroke="#c9b8ff" stroke-width="2.5" opacity="0.85" fill="none">
+      <polygon points="0,-70 66,52 -66,52" fill="#b69bff" opacity="0.55"/>
+      <line x1="0" y1="-150" x2="0" y2="-70"/>
+      <line x1="130" y1="-75" x2="66" y2="52"/>
+      <line x1="130" y1="75" x2="66" y2="52"/>
+      <line x1="0" y1="150" x2="66" y2="52"/>
+      <line x1="0" y1="150" x2="-66" y2="52"/>
+      <line x1="-130" y1="75" x2="-66" y2="52"/>
+      <line x1="-130" y1="-75" x2="-66" y2="52"/>
+    </g>
+    <!-- the "20" -->
+    <text x="0" y="20" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="58" font-weight="800" fill="#ffffff" stroke="none">20</text>
+    <!-- verified badge -->
+    <g transform="translate(96 -104)" stroke="none">
+      <circle cx="0" cy="0" r="30" fill="#10101a"/>
+      <circle cx="0" cy="0" r="26" fill="#34d399"/>
+      <path d="M -12 1 L -3 11 L 13 -10" fill="none" stroke="#0b1f17" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <!-- wordmark -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+    <text x="500" y="300" font-size="132" font-weight="800" letter-spacing="-3" fill="#ffffff">GM<tspan fill="#a78bfa">Zero</tspan></text>
+    <text x="504" y="360" font-size="34" font-weight="600" fill="#d8d2e8">A Verifiable AI Game Master on 0G</text>
+
+    <!-- pillar chips -->
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22" font-weight="600">
+      <g>
+        <rect x="504" y="398" width="172" height="44" rx="22" fill="#a78bfa" opacity="0.14"/>
+        <rect x="504" y="398" width="172" height="44" rx="22" fill="none" stroke="#a78bfa" stroke-opacity="0.45"/>
+        <text x="590" y="426" text-anchor="middle" fill="#c9b8ff">0G Compute</text>
+      </g>
+      <g>
+        <rect x="688" y="398" width="166" height="44" rx="22" fill="#34d399" opacity="0.12"/>
+        <rect x="688" y="398" width="166" height="44" rx="22" fill="none" stroke="#34d399" stroke-opacity="0.45"/>
+        <text x="771" y="426" text-anchor="middle" fill="#7ee8be">0G Storage</text>
+      </g>
+      <g>
+        <rect x="866" y="398" width="150" height="44" rx="22" fill="#ffc24a" opacity="0.12"/>
+        <rect x="866" y="398" width="150" height="44" rx="22" fill="none" stroke="#ffc24a" stroke-opacity="0.45"/>
+        <text x="941" y="426" text-anchor="middle" fill="#ffd486">0G Chain</text>
+      </g>
+    </g>
+
+    <text x="504" y="486" font-size="20" font-weight="500" fill="#8a83a0">Verify the dice. Own the loot. No house edge.</text>
+  </g>
+</svg>
