@@ -179,6 +179,17 @@ interface EnemyView {
   poison: number; burn: number; stun: number; windup: number; enraged: boolean;
 }
 
+/** Combat-log line, colored by who/what it's about. */
+type LogKind = "you" | "enemy" | "loot" | "info" | "warn";
+interface LogLine { text: string; kind: LogKind }
+const LOG_COLOR: Record<LogKind, string> = {
+  you: "text-sky-300",
+  enemy: "text-red-300",
+  loot: "text-amber-300",
+  warn: "text-fuchsia-300",
+  info: "text-white/55",
+};
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default function PixelStage({
@@ -265,9 +276,13 @@ export default function PixelStage({
   const [turn, setTurn] = useState<Turn>("player");
   const [enemyView, setEnemyView] = useState<EnemyView[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
-  const [log, setLog] = useState<string[]>(["A foe stirs in the dark…"]);
+  const [log, setLog] = useState<LogLine[]>([{ text: "A foe stirs in the dark…", kind: "info" }]);
   const [cd, setCd] = useState(0);
   const [floor, setFloor] = useState(startFloor);
+  const logBoxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    logBoxRef.current?.scrollTo({ top: logBoxRef.current.scrollHeight });
+  }, [log]);
 
   useEffect(() => {
     activeRef.current = active;
@@ -295,8 +310,8 @@ export default function PixelStage({
     );
   }, []);
 
-  const pushLog = useCallback((line: string) => {
-    setLog((l) => [...l.slice(-5), line]);
+  const pushLog = useCallback((text: string, kind: LogKind = "info") => {
+    setLog((l) => [...l.slice(-7), { text, kind }]);
   }, []);
 
   const float = (x: number, y: number, text: string, color: string) =>
@@ -361,7 +376,7 @@ export default function PixelStage({
         boss: true, poison: 0, burn: 0, stun: 0, windup: 0, enraged: false, bossDrop: b.drop,
         spriteMap: sprite?.map, spritePal: sprite?.pal,
       });
-      pushLog(`⚠ The floor ${floorN} guardian appears: ${b.name}!`);
+      pushLog(`⚠ The floor ${floorN} guardian appears: ${b.name}!`, "warn");
       shake(7); playSfx("boss");
     } else {
       // Deeper floors introduce tougher variety into the pool.
@@ -383,7 +398,7 @@ export default function PixelStage({
           boss: false, poison: 0, burn: 0, stun: 0, windup: 0, enraged: false,
         });
       }
-      pushLog(`${list.length} ${list.length === 1 ? "foe emerges" : "foes emerge"} from the shadows.`);
+      pushLog(`${list.length} ${list.length === 1 ? "foe emerges" : "foes emerge"} from the shadows.`, "info");
     }
 
     enemiesRef.current = list;
@@ -544,19 +559,19 @@ export default function PixelStage({
     const gold = e.gold[0] + ((Math.random() * (e.gold[1] - e.gold[0] + 1)) | 0);
     onEventRef.current({ goldDelta: gold });
     float(e.x, e.y - 6, `+${gold}g`, "#ffc24a");
-    pushLog(`${e.boss ? `${e.name} is slain` : `${e.name} falls`}! +${gold} gold.`);
+    pushLog(`${e.boss ? `${e.name} is slain` : `${e.name} falls`}! +${gold} gold.`, "loot");
 
     if (e.boss && e.bossDrop) {
       onEventRef.current({ loot: e.bossDrop });
       float(e.x, e.y - 20, e.bossDrop.name, RARITY_COLOR[e.bossDrop.rarity]);
-      pushLog(`The ${e.name} yields the ${e.bossDrop.name}!`);
+      pushLog(`The ${e.name} yields the ${e.bossDrop.name}!`, "loot");
       playSfx("loot");
     } else {
       for (const d of MOBS[e.kind].drops) {
         if (Math.random() < d.chance) {
           onEventRef.current({ loot: { name: d.name, rarity: d.rarity } });
           float(e.x, e.y - 20, d.name, RARITY_COLOR[d.rarity]);
-          pushLog(`Looted ${d.name}!`);
+          pushLog(`Looted ${d.name}!`, "loot");
           playSfx("loot");
           break;
         }
@@ -624,12 +639,15 @@ export default function PixelStage({
     let extra = "";
     if (opts?.poison) { heroPoisonRef.current += opts.poison; extra += " · poisoned"; }
     if (opts?.burn) { heroBurnRef.current += opts.burn; extra += " · burning"; }
-    pushLog(`${label} for ${dmg}${blocked ? " (reduced)" : ""}${extra}.`);
+    pushLog(`${label} for ${dmg}${blocked ? " (reduced)" : ""}${extra}.`, "enemy");
   };
 
   const enemyTurn = useCallback(async () => {
     const alive = () => enemiesRef.current.filter((e) => !e.dead);
-    const dead = () => { setTurn("over"); playSfx("death"); pushLog("You have fallen…"); };
+    const dead = () => { setTurn("over"); playSfx("death"); pushLog("You have fallen…", "warn"); };
+
+    // Announce the enemy phase so the turn order reads clearly.
+    if (alive().length > 0) { pushLog("— The enemies strike back —", "info"); await sleep(280); }
 
     // 1) poison + burn ticks (may clear the wave outright)
     if (enemiesRef.current.some((e) => !e.dead && (e.poison > 0 || e.burn > 0))) {
@@ -654,7 +672,7 @@ export default function PixelStage({
       if (e.boss && !e.enraged && e.hp <= e.maxHp / 2) {
         e.enraged = true; e.dmg = Math.round(e.dmg * 1.4);
         float(e.x, e.y - 14, "ENRAGED", "#ff5a4a"); shake(9); playSfx("boss");
-        pushLog(`${e.name} enrages — its blows grow heavier!`);
+        pushLog(`${e.name} enrages — its blows grow heavier!`, "warn");
         refreshView(); await sleep(280);
       }
 
@@ -683,7 +701,7 @@ export default function PixelStage({
       if (hasSpecial && Math.random() < (e.boss ? 0.45 : 0.3)) {
         e.windup = 1;
         float(e.x, e.y - 10, "⚡", "#ffd84a");
-        pushLog(`${e.name} winds up a ${e.boss ? "devastating" : "heavy"} attack…`);
+        pushLog(`${e.name} winds up a ${e.boss ? "devastating" : "heavy"} attack…`, "warn");
         refreshView(); await sleep(180);
         continue;
       }
@@ -704,8 +722,8 @@ export default function PixelStage({
       if (heroBurnRef.current > 0) heroBurnRef.current -= 1;
       float(HERO_X, HERO_Y - 6, `-${dot}`, burning ? "#ff8a3a" : "#8be08b");
       onEventRef.current({ hpDelta: -dot });
-      pushLog(`${burning ? "Flames sear you" : "Poison courses through you"} (-${dot}).`);
-      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You succumb…"); return; }
+      pushLog(`${burning ? "Flames sear you" : "Poison courses through you"} (-${dot}).`, "enemy");
+      if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You succumb…", "warn"); return; }
     }
 
     defendRef.current = false;
@@ -717,7 +735,7 @@ export default function PixelStage({
         waveNoRef.current = 1;
         setFloor(floorRef.current);
         onFloorRef.current(floorRef.current);
-        pushLog(`Floor cleared. You descend to floor ${floorRef.current}…`);
+        pushLog(`Floor cleared. You descend to floor ${floorRef.current}…`, "info");
       } else {
         waveNoRef.current += 1;
       }
@@ -742,7 +760,7 @@ export default function PixelStage({
     // Bats are evasive.
     if (target.kind === "bat" && Math.random() < 0.22) {
       float(target.x, target.y - 4, "miss", "#cfcad9");
-      pushLog(`The ${target.name} flits aside — you miss!`);
+      pushLog(`The ${target.name} flits aside — you miss!`, "you");
       refreshView();
       await sleep(220);
       await enemyTurn();
@@ -751,7 +769,7 @@ export default function PixelStage({
     const crit = Math.random() < critChance();
     const dmg = crit ? heroDamage() * 2 : heroDamage();
     hitEnemy(target, dmg, crit);
-    pushLog(`You strike the ${target.name} for ${dmg}${crit ? " (CRIT!)" : ""}!`);
+    pushLog(`You strike the ${target.name} for ${dmg}${crit ? " (CRIT!)" : ""}!`, "you");
     refreshView();
     await sleep(220);
     await enemyTurn();
@@ -770,7 +788,7 @@ export default function PixelStage({
     const crit = Math.random() < critChance();
     const cm = crit ? 2 : 1;
     const sk = SKILLS[klass].name;
-    pushLog(`You unleash ${sk}!${crit ? " CRIT!" : ""}`);
+    pushLog(`You unleash ${sk}!${crit ? " CRIT!" : ""}`, "you");
     shake(crit ? 6 : 4);
     await sleep(180);
     if (klass === "Warrior") {
@@ -801,7 +819,7 @@ export default function PixelStage({
     if (turn !== "player") return;
     setTurn("busy");
     defendRef.current = true;
-    pushLog("You raise your guard.");
+    pushLog("You raise your guard — incoming damage halved.", "you");
     heroRef.current.atkFlash = 120;
     await sleep(180);
     await enemyTurn();
@@ -866,11 +884,28 @@ export default function PixelStage({
         </div>
       )}
 
+      {/* turn-phase banner — makes whose turn it is unmistakable */}
+      <div
+        className={`mt-2 flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium ring-1 transition ${
+          over
+            ? "bg-red-500/10 text-red-300 ring-red-400/30"
+            : turn === "player"
+              ? "bg-sky-500/15 text-sky-200 ring-sky-400/40"
+              : "bg-red-500/10 text-red-200 ring-red-400/30"
+        }`}
+      >
+        {over ? "☠ Defeated" : turn === "player" ? "⚔ Your turn" : "⏳ Enemies acting…"}
+        <span className="font-normal text-white/40">
+          {!over && turn === "player" && "— pick Attack, Skill, or Defend"}
+        </span>
+      </div>
+
       {/* action buttons */}
       <div className="mt-2 flex flex-wrap gap-2">
         <button
           onClick={doAttack}
           disabled={!canAct || enemyView.length === 0}
+          title="Strike one enemy, then the enemies act"
           className="rounded-lg bg-red-600/80 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-40"
         >
           ⚔ Attack
@@ -886,20 +921,25 @@ export default function PixelStage({
         <button
           onClick={doDefend}
           disabled={!canAct}
+          title="Brace — halve the damage from the enemies' next turn"
           className="rounded-lg bg-sky-700/70 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-sky-600 disabled:opacity-40"
         >
           🛡 Defend
         </button>
-        <span className="ml-auto self-center text-[11px] text-white/40">
-          {over ? "—" : turn === "player" ? "Your turn" : "Resolving…"}
-        </span>
       </div>
 
-      {/* combat log (text guidance) */}
-      <div className="mt-2 h-16 overflow-y-auto rounded-lg border border-white/10 bg-black/40 p-2 text-[11px] leading-relaxed text-white/60">
+      {/* combat log — color-coded by who's acting */}
+      <div className="mt-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-white/30">
+        <span>Combat log</span>
+        <span>
+          <span className="text-sky-300">you</span> · <span className="text-red-300">foe</span> ·{" "}
+          <span className="text-amber-300">loot</span>
+        </span>
+      </div>
+      <div ref={logBoxRef} className="mt-1 h-24 overflow-y-auto rounded-lg border border-white/10 bg-black/40 p-2 text-[11px] leading-relaxed">
         {log.map((l, i) => (
-          <p key={i} className={i === log.length - 1 ? "text-white/80" : ""}>
-            {l}
+          <p key={i} className={`${LOG_COLOR[l.kind]} ${i === log.length - 1 ? "font-semibold" : "opacity-70"}`}>
+            {l.text}
           </p>
         ))}
       </div>
