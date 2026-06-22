@@ -220,6 +220,7 @@ export default function Game() {
   }
 
   function startAdventure() {
+    if (!name.trim()) return;
     const g = makeGame(name, klass);
     setLastSave(null);
     setState(g);
@@ -823,11 +824,18 @@ function NewGame(props: {
     <div className="mt-8 grid gap-6 md:grid-cols-2">
       <div className="rounded-2xl border border-white/10 bg-black/30 p-6">
         <h2 className="text-lg font-semibold">Forge a hero</h2>
-        <label className="mt-4 block text-xs text-white/50">Name</label>
+        <label className="mt-4 block text-xs text-white/50">
+          Name <span className="text-red-400">*</span>
+        </label>
         <input
           value={props.name}
           onChange={(e) => props.setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && props.name.trim() && !props.busy) props.onStart();
+          }}
+          maxLength={24}
           placeholder="e.g. Kaelra of the Ash"
+          aria-required
           className="mt-1 w-full rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none focus:border-violet-400/60"
         />
         <label className="mt-4 block text-xs text-white/50">Class</label>
@@ -848,10 +856,10 @@ function NewGame(props: {
         </div>
         <button
           onClick={props.onStart}
-          disabled={props.busy}
+          disabled={props.busy || !props.name.trim()}
           className="mt-6 w-full rounded-lg bg-violet-600 px-4 py-2.5 font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
         >
-          {props.busy ? "Summoning the world…" : "Begin the adventure"}
+          {props.busy ? "Summoning the world…" : props.name.trim() ? "Begin the adventure" : "Name your hero to begin"}
         </button>
       </div>
 
