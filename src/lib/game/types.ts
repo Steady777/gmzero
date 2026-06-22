@@ -10,6 +10,8 @@ export interface Character {
   inventory: string[];
 }
 
+export type Rarity = "common" | "rare" | "epic" | "legendary";
+
 export interface LogEntry {
   /** Monotonic turn index. */
   turn: number;
@@ -21,8 +23,16 @@ export interface LogEntry {
   roll: number;
   /** Short tag describing the outcome, e.g. "loot", "combat", "story". */
   outcome: string;
+  /** Items gained this turn, with rarity (for loot highlighting). */
+  loot: { name: string; rarity: Rarity }[];
+  /** GM-suggested next actions (clickable). */
+  suggestions: string[];
+  /** Quest ending declared by the GM this turn, if any. */
+  ending: "victory" | "defeat" | null;
   /** Verifiability proof attached to the GM inference for this turn. */
   proof: TurnProof;
+  /** On-chain anchor of this outcome (epic moments only). */
+  anchor: AnchorInfo | null;
 }
 
 export interface TurnProof {
@@ -40,10 +50,26 @@ export interface TurnProof {
   mode: "live" | "mock";
 }
 
+export interface AnchorInfo {
+  /** keccak256 of the outcome summary that was anchored. */
+  digest: string;
+  /** 0G Chain transaction hash. */
+  txHash: string;
+  /** Link to the tx on the 0G chain explorer. */
+  explorerUrl: string;
+  mode: "live" | "mock";
+}
+
+export type GameStatus = "playing" | "victory" | "defeat";
+
 export interface GameState {
   character: Character;
   /** Seed string for the adventure, kept for reproducibility. */
   seed: string;
+  /** The quest objective the player is pursuing. */
+  questGoal: string;
+  /** Current run status. */
+  status: GameStatus;
   /** Full ordered adventure log. */
   log: LogEntry[];
   /** 0G Storage root hash of the previous save (provenance chain). */
@@ -59,8 +85,10 @@ export interface GmDecision {
   outcome: string;
   hpDelta: number;
   goldDelta: number;
-  itemsGained: string[];
+  itemsGained: { name: string; rarity: Rarity }[];
   itemsLost: string[];
+  suggestions: string[];
+  ending: "victory" | "defeat" | "";
 }
 
 export function newCharacter(name: string, klass: Character["klass"]): Character {
@@ -81,3 +109,6 @@ export function newCharacter(name: string, klass: Character["klass"]): Character
     inventory: b.inventory ?? [],
   };
 }
+
+/** Sentinel action that asks the GM to generate the opening scene. */
+export const BEGIN_ACTION = "__BEGIN__";

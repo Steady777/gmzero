@@ -42,3 +42,6 @@ next-env.d.ts
 
 # 0G mock saves (local fallback)
 .gmzero-saves/
+
+# keep the example env (no secrets)
+!.env.example

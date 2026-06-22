@@ -160,17 +160,42 @@ function hashStr(s: string): number {
 
 function mockInference(_system: string, user: string): InferenceResult {
   const h = hashStr(user);
+  const isOpening = user.includes("PLAYER ACTION: __BEGIN__") || user.includes("OPENING SCENE");
+  const goal = (user.match(/QUEST GOAL: (.*)/)?.[1] ?? "uncover the truth").slice(0, 120);
+
+  if (isOpening) {
+    const decision = {
+      narration:
+        `Cold wind threads through the ruins as you arrive. Somewhere ahead lies your purpose: ${goal}. ` +
+        `Shadows pool between broken pillars, and the silence feels like it is watching you.`,
+      roll: 12,
+      outcome: "story",
+      hpDelta: 0,
+      goldDelta: 0,
+      itemsGained: [] as { name: string; rarity: string }[],
+      itemsLost: [] as string[],
+      suggestions: ["Scout the ruins carefully", "Call out into the dark", "Press straight ahead"],
+      ending: "",
+    };
+    return mockResult(decision, h);
+  }
+
   const roll = (h % 20) + 1;
   const action = (user.match(/PLAYER ACTION: (.*)/)?.[1] ?? "act").slice(0, 80);
 
   let outcome = "story";
   let hpDelta = 0;
   let goldDelta = 0;
-  const itemsGained: string[] = [];
+  const itemsGained: { name: string; rarity: string }[] = [];
   const itemsLost: string[] = [];
+  let ending = "";
   let flavor: string;
 
-  if (roll <= 5) {
+  if (roll === 1) {
+    outcome = "trap";
+    hpDelta = -(8 + (h % 8));
+    flavor = `Catastrophe. As you ${action}, everything goes wrong at once — the ground betrays you and pain explodes through your body.`;
+  } else if (roll <= 5) {
     outcome = "trap";
     hpDelta = -(3 + (h % 6));
     flavor = `Your attempt to ${action} goes wrong. A hidden danger lashes out and you stagger back, wounded.`;
@@ -182,13 +207,20 @@ function mockInference(_system: string, user: string): InferenceResult {
   } else if (roll <= 15) {
     outcome = "loot";
     goldDelta = 8 + (h % 12);
-    if (roll >= 14) itemsGained.push(pick(h, ["Healing Herb", "Bronze Key", "Torch", "Rope"]));
+    if (roll >= 14)
+      itemsGained.push({ name: pick(h, ["Healing Herb", "Bronze Key", "Torch", "Rope"]), rarity: "rare" });
     flavor = `Things go your way as you ${action}. You uncover a small cache and pocket the spoils.`;
+  } else if (roll === 20) {
+    outcome = "boss";
+    goldDelta = 40 + (h % 30);
+    itemsGained.push({ name: pick(h, ["Crown of Varnholt", "Wyrmsteel Blade", "Heart of the Deep"]), rarity: "legendary" });
+    hpDelta = 5;
+    ending = "victory";
+    flavor = `A perfect, decisive stroke — you ${action} and the quest itself turns on this moment. The goal is yours: ${goal}.`;
   } else {
-    outcome = roll === 20 ? "loot" : "story";
+    outcome = "loot";
     goldDelta = 15 + (h % 20);
-    itemsGained.push(pick(h, ["Silver Ring", "Enchanted Dagger", "Ancient Map", "Crystal Vial"]));
-    if (roll === 20) hpDelta = 3;
+    itemsGained.push({ name: pick(h, ["Silver Ring", "Enchanted Dagger", "Ancient Map", "Crystal Vial"]), rarity: "epic" });
     flavor = `A stroke of brilliance — you ${action} flawlessly. Fortune rewards you handsomely.`;
   }
 
@@ -200,8 +232,24 @@ function mockInference(_system: string, user: string): InferenceResult {
     goldDelta,
     itemsGained,
     itemsLost,
+    suggestions: pickSuggestions(h, outcome),
+    ending,
   };
 
+  return mockResult(decision, h);
+}
+
+function pickSuggestions(h: number, outcome: string): string[] {
+  const banks: Record<string, string[]> = {
+    combat: ["Press the attack", "Fall back and regroup", "Try to disarm them"],
+    loot: ["Search for more", "Pocket it and move on", "Inspect it closely"],
+    trap: ["Tend your wounds", "Retreat carefully", "Push on regardless"],
+    default: ["Explore further", "Rest a moment", "Look for another way"],
+  };
+  return banks[outcome] ?? banks.default;
+}
+
+function mockResult(decision: unknown, h: number): InferenceResult {
   return {
     content: JSON.stringify(decision),
     proof: {

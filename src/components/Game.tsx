@@ -2,10 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  BEGIN_ACTION,
   newCharacter,
+  type AnchorInfo,
   type Character,
   type GameState,
+  type GameStatus,
   type LogEntry,
+  type Rarity,
 } from "@/lib/game/types";
 
 interface Status {
@@ -17,19 +21,28 @@ interface Status {
 
 const CLASSES: Character["klass"][] = ["Warrior", "Mage", "Rogue", "Ranger"];
 
-const SEEDS = [
-  "The Sunken Crypt of Varnholt",
-  "Ashfall Pass and the Ember Wyrm",
-  "The Drowned Market of Pellis",
-  "Thornveil Wood at the Witching Hour",
+const QUESTS: { seed: string; goal: string }[] = [
+  { seed: "The Sunken Crypt of Varnholt", goal: "claim the Crown of Varnholt from its drowned vault" },
+  { seed: "Ashfall Pass and the Ember Wyrm", goal: "slay the Ember Wyrm before it wakes the mountain" },
+  { seed: "The Drowned Market of Pellis", goal: "recover the Heart of the Deep from the tide-cult" },
+  { seed: "Thornveil Wood at the Witching Hour", goal: "break the witch's pact binding the village" },
 ];
+
+const RARITY_STYLE: Record<Rarity, string> = {
+  common: "text-white/70 bg-white/5",
+  rare: "text-sky-300 bg-sky-500/10 ring-1 ring-sky-400/30",
+  epic: "text-fuchsia-300 bg-fuchsia-500/10 ring-1 ring-fuchsia-400/30",
+  legendary: "text-amber-300 bg-amber-500/10 ring-1 ring-amber-400/40",
+};
 
 function makeGame(name: string, klass: Character["klass"]): GameState {
   const now = new Date().toISOString();
-  const seed = SEEDS[Math.floor(Math.random() * SEEDS.length)];
+  const q = QUESTS[Math.floor(Math.random() * QUESTS.length)];
   return {
     character: newCharacter(name.trim() || "Wanderer", klass),
-    seed,
+    seed: q.seed,
+    questGoal: q.goal,
+    status: "playing",
     log: [],
     prevRootHash: null,
     createdAt: now,
@@ -52,6 +65,7 @@ export default function Game() {
     explorerUrl: string | null;
   } | null>(null);
   const [loadHash, setLoadHash] = useState("");
+  const [proofOf, setProofOf] = useState<LogEntry | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -65,28 +79,44 @@ export default function Game() {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
   }, [state?.log.length]);
 
-  async function submitAction(e?: React.FormEvent) {
-    e?.preventDefault();
-    if (!state || !action.trim() || busy) return;
+  async function runTurn(current: GameState, actionText: string) {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/gm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ state, action }),
+        body: JSON.stringify({ state: current, action: actionText }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "GM failed");
-      const character = data.character as Character;
-      const entry = data.entry as LogEntry;
-      setState({ ...state, character, log: [...state.log, entry], updatedAt: new Date().toISOString() });
+      setState({
+        ...current,
+        character: data.character as Character,
+        status: (data.status as GameStatus) ?? current.status,
+        log: [...current.log, data.entry as LogEntry],
+        updatedAt: new Date().toISOString(),
+      });
       setAction("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setBusy(false);
     }
+  }
+
+  function startAdventure() {
+    const g = makeGame(name, klass);
+    setLastSave(null);
+    setState(g);
+    void runTurn(g, BEGIN_ACTION);
+  }
+
+  function submitAction(e?: React.FormEvent) {
+    e?.preventDefault();
+    if (!state || !action.trim() || state.status !== "playing") return;
+    void runTurn(state, action.trim());
   }
 
   async function saveToOg() {
@@ -127,6 +157,8 @@ export default function Game() {
     }
   }
 
+  const lastSuggestions = state?.log.at(-1)?.suggestions ?? [];
+
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6">
       <Header status={status} />
@@ -145,52 +177,74 @@ export default function Game() {
           setKlass={setKlass}
           loadHash={loadHash}
           setLoadHash={setLoadHash}
-          onStart={() => setState(makeGame(name, klass))}
+          onStart={startAdventure}
           onLoad={loadFromOg}
           busy={busy}
         />
       ) : (
         <div className="mt-6 grid gap-5 md:grid-cols-[1fr_280px]">
           <main className="flex flex-col">
-            <div className="mb-2 flex items-center gap-2 text-xs text-violet-300/70">
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-violet-300/70">
               <span className="rounded bg-violet-500/15 px-2 py-0.5">Quest</span>
-              <span className="truncate">{state.seed}</span>
+              <span>{state.seed}</span>
+              <span className="text-white/40">·</span>
+              <span className="text-white/50">Goal: {state.questGoal}</span>
             </div>
 
             <div
               ref={logRef}
-              className="log-scroll h-[52vh] overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-4"
+              className="log-scroll h-[50vh] overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-4"
             >
               {state.log.length === 0 ? (
                 <p className="text-sm text-white/50">
-                  Your tale begins. Type your first action below — explore, fight, sneak, or speak.
-                  The GM will roll a d20 on 0G Compute and narrate what happens.
+                  {busy ? "The world is forming around you…" : "Your tale is about to begin."}
                 </p>
               ) : (
                 <ul className="space-y-4">
                   {state.log.map((l) => (
-                    <LogItem key={l.turn} entry={l} />
+                    <LogItem key={l.turn} entry={l} onProof={() => setProofOf(l)} />
                   ))}
+                  {busy && <li className="animate-pulse text-sm text-violet-300/70">The GM is deciding…</li>}
                 </ul>
               )}
             </div>
 
-            <form onSubmit={submitAction} className="mt-3 flex gap-2">
-              <input
-                value={action}
-                onChange={(e) => setAction(e.target.value)}
-                placeholder={busy ? "The GM is deciding..." : "What do you do?"}
-                disabled={busy}
-                className="flex-1 rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none focus:border-violet-400/60 disabled:opacity-60"
-              />
-              <button
-                type="submit"
-                disabled={busy || !action.trim()}
-                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
-              >
-                {busy ? "Rolling…" : "Act"}
-              </button>
-            </form>
+            {state.status === "playing" ? (
+              <>
+                {lastSuggestions.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {lastSuggestions.map((s, i) => (
+                      <button
+                        key={i}
+                        onClick={() => state && runTurn(state, s)}
+                        disabled={busy}
+                        className="rounded-full border border-violet-400/30 bg-violet-500/5 px-3 py-1 text-xs text-violet-200 transition hover:bg-violet-500/15 disabled:opacity-40"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <form onSubmit={submitAction} className="mt-3 flex gap-2">
+                  <input
+                    value={action}
+                    onChange={(e) => setAction(e.target.value)}
+                    placeholder={busy ? "The GM is deciding..." : "What do you do?"}
+                    disabled={busy}
+                    className="flex-1 rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none focus:border-violet-400/60 disabled:opacity-60"
+                  />
+                  <button
+                    type="submit"
+                    disabled={busy || !action.trim()}
+                    className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
+                  >
+                    {busy ? "Rolling…" : "Act"}
+                  </button>
+                </form>
+              </>
+            ) : (
+              <EndBanner status={state.status} onRestart={() => { setState(null); setLastSave(null); }} />
+            )}
           </main>
 
           <aside className="space-y-4">
@@ -213,6 +267,8 @@ export default function Game() {
           </aside>
         </div>
       )}
+
+      {proofOf && <ProofModal entry={proofOf} status={status} onClose={() => setProofOf(null)} />}
     </div>
   );
 }
@@ -288,9 +344,10 @@ function NewGame(props: {
         </div>
         <button
           onClick={props.onStart}
-          className="mt-6 w-full rounded-lg bg-violet-600 px-4 py-2.5 font-medium text-white transition hover:bg-violet-500"
+          disabled={props.busy}
+          className="mt-6 w-full rounded-lg bg-violet-600 px-4 py-2.5 font-medium text-white transition hover:bg-violet-500 disabled:opacity-40"
         >
-          Begin the adventure
+          {props.busy ? "Summoning the world…" : "Begin the adventure"}
         </button>
       </div>
 
@@ -319,7 +376,7 @@ function NewGame(props: {
   );
 }
 
-function LogItem({ entry }: { entry: LogEntry }) {
+function LogItem({ entry, onProof }: { entry: LogEntry; onProof: () => void }) {
   const p = entry.proof;
   const verifyColor =
     p.verified === true
@@ -344,21 +401,67 @@ function LogItem({ entry }: { entry: LogEntry }) {
           {entry.roll}
         </span>
       </div>
-      <p className="mt-1 text-sm text-white/60 italic">&gt; {entry.action}</p>
+      {entry.action !== "The adventure begins" && (
+        <p className="mt-1 text-sm text-white/60 italic">&gt; {entry.action}</p>
+      )}
       <p className="mt-1 text-[15px] leading-relaxed">{entry.narration}</p>
+
+      {entry.loot.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {entry.loot.map((it, i) => (
+            <span key={i} className={`rounded-full px-2 py-0.5 text-[11px] ${RARITY_STYLE[it.rarity]}`}>
+              ✦ {it.name}
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px]">
-        <span className={`rounded-full px-2 py-0.5 ring-1 ${verifyColor}`}>⛓ {verifyLabel}</span>
+        <button
+          onClick={onProof}
+          className={`rounded-full px-2 py-0.5 ring-1 transition hover:brightness-125 ${verifyColor}`}
+          title="Inspect verification"
+        >
+          ⛓ {verifyLabel} · verify
+        </button>
+        {entry.anchor && (
+          <a
+            href={entry.anchor.explorerUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300 ring-1 ring-amber-400/30 hover:brightness-125"
+            title="Anchored on 0G Chain"
+          >
+            ⚓ on-chain ↗
+          </a>
+        )}
         <span className="rounded-full bg-white/5 px-2 py-0.5 text-white/40">{p.model}</span>
-        {p.verifiability && p.verifiability !== "none" && (
-          <span className="rounded-full bg-white/5 px-2 py-0.5 text-white/40">{p.verifiability}</span>
-        )}
-        {p.mode === "live" && p.provider && (
-          <span className="rounded-full bg-white/5 px-2 py-0.5 font-mono text-white/30">
-            {p.provider.slice(0, 6)}…{p.provider.slice(-4)}
-          </span>
-        )}
       </div>
     </li>
+  );
+}
+
+function EndBanner({ status, onRestart }: { status: GameStatus; onRestart: () => void }) {
+  const win = status === "victory";
+  return (
+    <div
+      className={`mt-3 rounded-xl border p-4 text-center ${
+        win ? "border-amber-400/40 bg-amber-500/10" : "border-red-500/40 bg-red-500/10"
+      }`}
+    >
+      <p className={`text-lg font-bold ${win ? "text-amber-300" : "text-red-300"}`}>
+        {win ? "⚔ Victory — the quest is fulfilled" : "☠ Defeat — your tale ends here"}
+      </p>
+      <p className="mt-1 text-xs text-white/50">
+        Save your final state to 0G Storage to keep the record, or begin anew.
+      </p>
+      <button
+        onClick={onRestart}
+        className="mt-3 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
+      >
+        New adventure
+      </button>
+    </div>
   );
 }
 
@@ -443,6 +546,97 @@ function SavePanel(props: {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function ProofModal({
+  entry,
+  status,
+  onClose,
+}: {
+  entry: LogEntry;
+  status: Status | null;
+  onClose: () => void;
+}) {
+  const p = entry.proof;
+  const a: AnchorInfo | null = entry.anchor;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-white/15 bg-[#12101c] p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold">Turn {entry.turn} · verification</h3>
+          <button onClick={onClose} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <p className="mt-1 text-xs text-white/50">
+          This is the proof attached to the GM&apos;s d20 roll of{" "}
+          <span className="font-mono text-violet-300">{entry.roll}</span>.
+        </p>
+
+        <dl className="mt-4 space-y-2 text-sm">
+          <Row k="Inference">
+            {p.mode === "live" ? "0G Compute" : "Mock (local)"}
+          </Row>
+          <Row k="TEE verified">
+            <span
+              className={
+                p.verified === true
+                  ? "text-emerald-300"
+                  : p.verified === false
+                    ? "text-red-300"
+                    : "text-white/50"
+              }
+            >
+              {p.verified === true ? "yes ✓" : p.verified === false ? "failed ✕" : p.mode === "mock" ? "n/a (mock)" : "unverified"}
+            </span>
+          </Row>
+          <Row k="Model">{p.model}</Row>
+          {p.verifiability && p.verifiability !== "none" && <Row k="Verifiability">{p.verifiability}</Row>}
+          <Row k="Provider">
+            <span className="break-all font-mono text-xs">{p.provider}</span>
+          </Row>
+          <Row k="Response key">
+            <span className="break-all font-mono text-xs">{p.chatId}</span>
+          </Row>
+        </dl>
+
+        {a && (
+          <div className="mt-4 rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
+            <p className="text-xs font-medium text-amber-300">⚓ Anchored on 0G Chain</p>
+            <p className="mt-1 break-all font-mono text-[11px] text-white/60">digest {a.digest}</p>
+            <a
+              href={a.explorerUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-block text-xs text-violet-300 underline"
+            >
+              view tx on chainscan ↗
+            </a>
+            {a.mode === "mock" && <span className="ml-2 text-[10px] text-white/40">(mock tx)</span>}
+          </div>
+        )}
+
+        {status?.mode === "mock" && (
+          <p className="mt-4 text-[11px] text-amber-300/70">
+            Running in mock mode. Set a funded OG_PRIVATE_KEY to produce real TEE-verified proofs and live 0G Chain anchors.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Row({ k, children }: { k: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <dt className="text-white/50">{k}</dt>
+      <dd className="text-right">{children}</dd>
     </div>
   );
 }
