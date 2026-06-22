@@ -4,9 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import PixelStage, { type CombatEvent } from "@/components/PixelStage";
 import { connectWallet, mintItemWithWallet, sellItemWithWallet, shortAddr } from "@/lib/wallet";
 import {
+  activeSet,
   atkOf,
+  boonChoices,
   critOf,
   defOf,
+  GEMS,
+  isGem,
   isUpgrade,
   itemDef,
   marketValue,
@@ -15,6 +19,7 @@ import {
   slotOf,
   MARKET,
   SHOP,
+  type Boon,
   type ItemSlot,
   type MarketListing,
   type ShopEntry,
@@ -22,9 +27,11 @@ import {
 import {
   BEGIN_ACTION,
   classAtk,
+  emptyMods,
   newCharacter,
   type AnchorInfo,
   type Character,
+  type CharMods,
   type GameState,
   type GameStatus,
   type LogEntry,
@@ -84,8 +91,21 @@ function normalizeState(s: GameState): GameState {
         weapon: c.inventory.find((it) => slotOf(it) === "weapon") ?? null,
         shield: c.inventory.find((it) => slotOf(it) === "shield") ?? null,
       },
+      mods: c.mods ?? emptyMods(),
     },
   };
+}
+
+/** Boons (character.mods) + active gear-set bonus, combined. */
+function totalMods(c: Character): CharMods {
+  const m: CharMods = { ...emptyMods(), ...c.mods };
+  const set = activeSet(c.equipped.weapon, c.equipped.shield);
+  if (set) {
+    for (const k of Object.keys(set.bonus) as (keyof CharMods)[]) {
+      m[k] = (m[k] ?? 0) + (set.bonus[k] ?? 0);
+    }
+  }
+  return m;
 }
 
 interface RunEntry {
@@ -143,6 +163,7 @@ export default function Game() {
   const [proofOf, setProofOf] = useState<LogEntry | null>(null);
   const [shop, setShop] = useState(false);
   const [market, setMarket] = useState(false);
+  const [boonOffer, setBoonOffer] = useState<Boon[] | null>(null);
   const [mints, setMints] = useState<Record<string, MintInfo>>({});
   const [minting, setMinting] = useState<string | null>(null);
   const [selling, setSelling] = useState<string | null>(null);
@@ -315,11 +336,58 @@ export default function Game() {
     });
   }
 
-  /** Record the new depth (run score), open the shop, and narrate the cleared floor. */
+  /** On descent: apply regen, bump depth, offer a boon, then narrate. */
   function handleFloor(depth: number) {
-    setState((prev) => (prev ? { ...prev, depth: Math.max(prev.depth, depth) } : prev));
-    setShop(true);
+    setState((prev) => {
+      if (!prev) return prev;
+      const c = { ...prev.character };
+      if (c.mods.regen > 0) c.hp = Math.min(c.maxHp, c.hp + c.mods.regen);
+      return { ...prev, character: c, depth: Math.max(prev.depth, depth) };
+    });
+    setBoonOffer(boonChoices(depth));
     void narrateFloor(depth);
+  }
+
+  /** Apply a chosen boon, then move on to the shop. */
+  function pickBoon(boon: Boon) {
+    setState((prev) => {
+      if (!prev) return prev;
+      const c = { ...prev.character, mods: { ...prev.character.mods } };
+      if (boon.mods) {
+        for (const k of Object.keys(boon.mods) as (keyof CharMods)[]) {
+          c.mods[k] = (c.mods[k] ?? 0) + (boon.mods[k] ?? 0);
+        }
+      }
+      if (boon.maxHp) {
+        c.maxHp += boon.maxHp;
+        c.hp += boon.maxHp;
+      }
+      return { ...prev, character: c, updatedAt: new Date().toISOString() };
+    });
+    setBoonOffer(null);
+    setShop(true);
+  }
+
+  /** Socket a gem from inventory into the matching equipped slot (consumes the gem). */
+  function socketGem(gem: string) {
+    const suffix = GEMS[gem];
+    if (!suffix) return;
+    // def gems → shield; everything else → weapon
+    const slot: ItemSlot = gem === "Sapphire" ? "shield" : "weapon";
+    setState((prev) => {
+      if (!prev) return prev;
+      const c = { ...prev.character, inventory: [...prev.character.inventory], equipped: { ...prev.character.equipped } };
+      const target = c.equipped[slot];
+      const gi = c.inventory.indexOf(gem);
+      if (!target || gi === -1) return prev;
+      const socketed = `${target} ${suffix}`;
+      // replace the equipped item's inventory entry + equip reference, consume the gem
+      const ti = c.inventory.indexOf(target);
+      if (ti !== -1) c.inventory[ti] = socketed;
+      c.equipped[slot] = socketed;
+      c.inventory.splice(c.inventory.indexOf(gem), 1);
+      return { ...prev, character: c, updatedAt: new Date().toISOString() };
+    });
   }
 
   function buyItem(entry: ShopEntry) {
@@ -529,10 +597,11 @@ export default function Game() {
                 active={state.status === "playing"}
                 playerHp={state.character.hp}
                 level={state.character.level}
-                atkBonus={atkOf(state.character.equipped.weapon)}
-                defBonus={defOf(state.character.equipped.shield)}
-                critBonus={critOf(state.character.equipped.weapon)}
-                poisonOnHit={poisonOf(state.character.equipped.weapon)}
+                atkBonus={atkOf(state.character.equipped.weapon) + totalMods(state.character).atk}
+                defBonus={defOf(state.character.equipped.shield) + totalMods(state.character).def}
+                critBonus={critOf(state.character.equipped.weapon) + totalMods(state.character).crit}
+                poisonOnHit={poisonOf(state.character.equipped.weapon) + totalMods(state.character).poison}
+                lifesteal={totalMods(state.character).lifesteal}
                 startFloor={state.depth}
                 onEvent={handleCombat}
                 onFloor={handleFloor}
@@ -611,6 +680,7 @@ export default function Game() {
               onUnequip={unequipSlot}
               onUse={useConsumable}
               onMint={mintLoot}
+              onSocket={socketGem}
             />
             <SavePanel
               onSave={saveToOg}
@@ -653,6 +723,30 @@ export default function Game() {
           onClose={() => setMarket(false)}
         />
       )}
+      {boonOffer && <BoonModal choices={boonOffer} onPick={pickBoon} />}
+    </div>
+  );
+}
+
+function BoonModal({ choices, onPick }: { choices: Boon[]; onPick: (b: Boon) => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-violet-400/30 bg-[#12101c] p-6">
+        <h3 className="text-lg font-semibold">⭐ Choose a boon</h3>
+        <p className="mt-1 text-xs text-white/50">You cleared a floor. Pick one lasting blessing for this run.</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          {choices.map((b) => (
+            <button
+              key={b.id}
+              onClick={() => onPick(b)}
+              className="rounded-xl border border-white/15 bg-black/30 p-4 text-left transition hover:border-violet-400/60 hover:bg-violet-500/10"
+            >
+              <p className="font-medium text-violet-200">{b.label}</p>
+              <p className="mt-1 text-xs text-white/60">{b.desc}</p>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1078,6 +1172,7 @@ function StatsPanel({
   onUnequip,
   onUse,
   onMint,
+  onSocket,
 }: {
   c: Character;
   depth: number;
@@ -1087,10 +1182,13 @@ function StatsPanel({
   onUnequip: (slot: ItemSlot) => void;
   onUse: (name: string) => void;
   onMint: (name: string) => void;
+  onSocket: (name: string) => void;
 }) {
+  const m = totalMods(c);
+  const set = activeSet(c.equipped.weapon, c.equipped.shield);
   const hpPct = Math.round((c.hp / c.maxHp) * 100);
-  const atk = classAtk(c.klass, c.level) + atkOf(c.equipped.weapon);
-  const def = defOf(c.equipped.shield);
+  const atk = classAtk(c.klass, c.level) + atkOf(c.equipped.weapon) + m.atk;
+  const def = defOf(c.equipped.shield) + m.def;
   return (
     <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
       <div className="flex items-baseline justify-between">
@@ -1119,6 +1217,20 @@ function StatsPanel({
         <Stat label="DEF" value={`🛡 ${def}`} tone="text-sky-300" />
         <Stat label="Depth" value={`⛏ ${depth}`} tone="text-amber-300" />
       </div>
+
+      {(set || m.crit > 0 || m.lifesteal > 0 || m.poison > 0 || m.regen > 0) && (
+        <div className="mt-2 flex flex-wrap gap-1 text-[10px]">
+          {set && (
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-300 ring-1 ring-amber-400/30" title="Set bonus active">
+              ◆ {set.name} set
+            </span>
+          )}
+          {m.crit > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-white/60">crit +{Math.round(m.crit * 100)}%</span>}
+          {m.lifesteal > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-white/60">lifesteal {Math.round(m.lifesteal * 100)}%</span>}
+          {m.poison > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-white/60">+{m.poison} poison</span>}
+          {m.regen > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-white/60">{m.regen} regen</span>}
+        </div>
+      )}
 
       <div className="mt-3 flex items-center justify-between text-sm">
         <span className="text-white/50">Gold</span>
@@ -1151,6 +1263,15 @@ function StatsPanel({
                       className="rounded bg-emerald-600/70 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-500"
                     >
                       Use +{idef.heal}
+                    </button>
+                  )}
+                  {isGem(it) && (c.equipped.weapon || c.equipped.shield) && (
+                    <button
+                      onClick={() => onSocket(it)}
+                      className="rounded bg-sky-600/70 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-sky-500"
+                      title="Socket this gem into your equipped gear"
+                    >
+                      Socket
                     </button>
                   )}
                   {(idef.slot === "weapon" || idef.slot === "shield") &&

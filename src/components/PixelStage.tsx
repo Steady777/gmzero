@@ -183,7 +183,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default function PixelStage({
   klass, active, playerHp, level, atkBonus, defBonus, critBonus = 0, poisonOnHit = 0,
-  startFloor = 1, onEvent, onFloor,
+  lifesteal = 0, startFloor = 1, onEvent, onFloor,
 }: {
   klass: Character["klass"];
   active: boolean;
@@ -197,6 +197,8 @@ export default function PixelStage({
   critBonus?: number;
   /** Poison stacks applied to enemies on hit (weapon affix). */
   poisonOnHit?: number;
+  /** Fraction of damage dealt healed back to the hero (0..1). */
+  lifesteal?: number;
   /** Floor to start the dive on (e.g. resuming a save's depth). */
   startFloor?: number;
   onEvent: (e: CombatEvent) => void;
@@ -215,6 +217,7 @@ export default function PixelStage({
   const defRef = useRef(defBonus);
   const critRef = useRef(critBonus);
   const poisonHitRef = useRef(poisonOnHit);
+  const lifestealRef = useRef(lifesteal);
   const heroPoisonRef = useRef(0);
   const heroBurnRef = useRef(0);
   const activeRef = useRef(active);
@@ -245,12 +248,13 @@ export default function PixelStage({
     defRef.current = defBonus;
     critRef.current = critBonus;
     poisonHitRef.current = poisonOnHit;
+    lifestealRef.current = lifesteal;
     onEventRef.current = onEvent;
     onFloorRef.current = onFloor;
     if (playerHp > 0) hpRef.current = playerHp; // sync narrative HP changes
     // Note: death is derived from playerHp at render time (see `over`), so we
     // intentionally avoid setState here.
-  }, [active, playerHp, level, atkBonus, defBonus, critBonus, poisonOnHit, onEvent, onFloor]);
+  }, [active, playerHp, level, atkBonus, defBonus, critBonus, poisonOnHit, lifesteal, onEvent, onFloor]);
 
   const refreshView = useCallback(() => {
     setEnemyView(
@@ -535,6 +539,14 @@ export default function PixelStage({
     spawnSparks(e.x + 12, e.y + 10, crit ? "#ffe27a" : "#ff9a9a", crit ? 12 : 6);
     if (crit) { float(e.x, e.y - 2, `CRIT ${dmg}!`, "#ffd84a"); shake(6); playSfx("crit"); }
     else { float(e.x, e.y + 2, `-${dmg}`, "#ff7a7a"); shake(2); playSfx("hit"); }
+    // Lifesteal: heal the hero for a fraction of damage dealt.
+    if (lifestealRef.current > 0) {
+      const heal = Math.max(1, Math.floor(dmg * lifestealRef.current));
+      hpRef.current = Math.min(hpRef.current + heal, 9999);
+      heroRef.current.atkFlash = 120;
+      float(HERO_X, HERO_Y - 8, `+${heal}`, "#7be0a0");
+      onEventRef.current({ hpDelta: heal });
+    }
     if (poisonHitRef.current > 0) {
       e.poison += poisonHitRef.current;
       float(e.x + 14, e.y + 12, `☠${e.poison}`, "#8be08b");

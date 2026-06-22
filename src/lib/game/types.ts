@@ -11,12 +11,30 @@ export interface Character {
   inventory: string[];
   /** Currently equipped gear (names reference items in src/lib/game/items.ts). */
   equipped: Equipped;
+  /** Permanent stat boosts from roguelike boons chosen on floor clears. */
+  mods: CharMods;
 }
 
 export interface Equipped {
   weapon: string | null;
   shield: string | null;
 }
+
+/** Accumulated bonuses from boons (added on top of equipment). */
+export interface CharMods {
+  atk: number;
+  def: number;
+  /** Extra crit chance, 0..1. */
+  crit: number;
+  /** Poison stacks added on hit. */
+  poison: number;
+  /** Fraction of damage dealt healed back, 0..1. */
+  lifesteal: number;
+  /** HP restored each time you descend a floor. */
+  regen: number;
+}
+
+export const emptyMods = (): CharMods => ({ atk: 0, def: 0, crit: 0, poison: 0, lifesteal: 0, regen: 0 });
 
 export type Rarity = "common" | "rare" | "epic" | "legendary";
 
@@ -145,6 +163,7 @@ export function newCharacter(name: string, klass: Character["klass"]): Character
       weapon: b.inventory.find((it) => slotOf(it) === "weapon") ?? null,
       shield: b.inventory.find((it) => slotOf(it) === "shield") ?? null,
     },
+    mods: emptyMods(),
   };
 }
 

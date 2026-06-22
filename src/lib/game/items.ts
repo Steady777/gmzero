@@ -8,7 +8,7 @@
  *   2. A keyword + rarity heuristic for anything the GM makes up, so live loot like
  *      "Wyrmsteel Blade" or "Crystal Vial" still equips / heals sensibly.
  */
-import type { Rarity } from "./types";
+import type { CharMods, Rarity } from "./types";
 
 export type ItemSlot = "weapon" | "shield" | "consumable";
 
@@ -65,6 +65,13 @@ const CATALOG: Record<string, ItemDef> = {
   "Ancient Map": { rarity: "epic" },
   "Crown of Varnholt": { rarity: "legendary" },
   "Heart of the Deep": { rarity: "legendary" },
+  // gems (socketable — see GEMS)
+  Ruby: { rarity: "rare" },
+  Sapphire: { rarity: "rare" },
+  Emerald: { rarity: "rare" },
+  Topaz: { rarity: "rare" },
+  "Imp Horn": { rarity: "rare" },
+  "Spectral Vial": { slot: "consumable", heal: 22, rarity: "epic" },
 };
 
 const WEAPON_RE = /(sword|blade|dagger|axe|cleaver|mace|spear|staff|bow|knife|hammer|scythe|glaive|fang|claw)/i;
@@ -88,7 +95,21 @@ const SUFFIXES: Record<string, Partial<ItemDef>> = {
   "of Venom": { poison: 3 },
   "of Fury": { atk: 3 },
   "of Precision": { crit: 0.15 },
+  // socketed gems (see GEMS) — parsed back the same way as affixes
+  "(Ruby)": { atk: 3 },
+  "(Sapphire)": { def: 2 },
+  "(Emerald)": { poison: 2 },
+  "(Topaz)": { crit: 0.12 },
 };
+
+/** Gem item name → the suffix it sockets onto equipped gear. */
+export const GEMS: Record<string, string> = {
+  Ruby: "(Ruby)",
+  Sapphire: "(Sapphire)",
+  Emerald: "(Emerald)",
+  Topaz: "(Topaz)",
+};
+export const isGem = (name: string): boolean => name in GEMS;
 
 interface ParsedAffix { base: string; bonus: Partial<ItemDef>; rank: number; }
 
@@ -167,8 +188,11 @@ export interface ShopEntry { name: string; cost: number; note: string; }
 export const SHOP: ShopEntry[] = [
   { name: "Healing Herb", cost: 12, note: "+12 HP" },
   { name: "Crystal Vial", cost: 30, note: "+25 HP" },
+  { name: "Ruby", cost: 35, note: "gem · socket +atk" },
+  { name: "Sapphire", cost: 35, note: "gem · socket +def" },
   { name: "Sturdy Cracked Shield", cost: 40, note: "shield · def" },
   { name: "Sharp Bat Fang", cost: 45, note: "weapon · atk" },
+  { name: "Topaz", cost: 60, note: "gem · socket +crit" },
   { name: "Keen Enchanted Dagger", cost: 80, note: "weapon · atk + crit" },
   { name: "Bone Cleaver of Fury", cost: 120, note: "weapon · big atk" },
 ];
@@ -186,6 +210,63 @@ export function marketValue(name: string): number {
     (d.poison ?? 0) * 8 +
     (d.heal ?? 0) * 2
   );
+}
+
+/** Strip any prefix/suffix/gem affixes to get the core item name (for set matching). */
+export function baseName(name: string): string {
+  const parsed = parseAffixes(name);
+  return parsed ? parsed.base : name;
+}
+
+export interface GearSet {
+  id: string;
+  name: string;
+  weapon: string; // base name
+  shield: string; // base name
+  bonus: Partial<CharMods>;
+}
+
+/** Two-piece gear sets: equip the matching weapon + shield for the set bonus. */
+export const SETS: GearSet[] = [
+  { id: "bonelord", name: "Bonelord", weapon: "Bone Cleaver", shield: "Cracked Shield", bonus: { atk: 3, crit: 0.1 } },
+  { id: "wyrmguard", name: "Wyrmguard", weapon: "Wyrmsteel Blade", shield: "Cracked Shield", bonus: { atk: 4, def: 2 } },
+];
+
+/** Active set (if the equipped weapon+shield base names match a set). */
+export function activeSet(weapon: string | null, shield: string | null): GearSet | null {
+  if (!weapon || !shield) return null;
+  const w = baseName(weapon), s = baseName(shield);
+  return SETS.find((set) => set.weapon === w && set.shield === s) ?? null;
+}
+
+export interface Boon {
+  id: string;
+  label: string;
+  desc: string;
+  mods?: Partial<CharMods>;
+  /** Immediate, permanent max-HP increase (also heals on pick). */
+  maxHp?: number;
+}
+
+/** Roguelike boons offered on each floor clear (pick one of three). */
+export const BOONS: Boon[] = [
+  { id: "might", label: "Warrior's Might", desc: "+3 ATK", mods: { atk: 3 } },
+  { id: "ward", label: "Ironward", desc: "+2 DEF", mods: { def: 2 } },
+  { id: "edge", label: "Keen Edge", desc: "+12% crit", mods: { crit: 0.12 } },
+  { id: "venom", label: "Venomcraft", desc: "+2 poison on hit", mods: { poison: 2 } },
+  { id: "vamp", label: "Vampirism", desc: "Heal 20% of damage dealt", mods: { lifesteal: 0.2 } },
+  { id: "vigor", label: "Vigor", desc: "+10 Max HP", maxHp: 10 },
+  { id: "mend", label: "Second Wind", desc: "Heal 8 HP each descent", mods: { regen: 8 } },
+];
+
+/** Pick three distinct boons (varies by floor so the offer isn't static). */
+export function boonChoices(floor: number): Boon[] {
+  const out: Boon[] = [];
+  const start = (floor * 3) % BOONS.length;
+  for (let i = 0; out.length < 3 && i < BOONS.length; i++) {
+    out.push(BOONS[(start + i) % BOONS.length]);
+  }
+  return out;
 }
 
 export interface MarketListing { name: string; price: number; }
