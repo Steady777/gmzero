@@ -115,11 +115,17 @@ function makeDailyGame(name: string, klass: Character["klass"]): { game: GameSta
 /** Backfill fields that may be absent in older saves loaded from 0G Storage. */
 function normalizeState(s: GameState): GameState {
   const c = s.character;
+  // Backfill hp/maxHp defensively — a malformed external save with a missing
+  // maxHp would otherwise propagate NaN into the combat heal/clamp math.
+  const maxHp = Number.isFinite(c.maxHp) && c.maxHp > 0 ? c.maxHp : 30;
+  const hp = Number.isFinite(c.hp) ? Math.max(0, Math.min(maxHp, c.hp)) : maxHp;
   return {
     ...s,
     depth: s.depth ?? 1,
     character: {
       ...c,
+      hp,
+      maxHp,
       equipped: c.equipped ?? {
         weapon: c.inventory.find((it) => slotOf(it) === "weapon") ?? null,
         shield: c.inventory.find((it) => slotOf(it) === "shield") ?? null,
@@ -465,6 +471,9 @@ export default function Game() {
       const res = await fetch(`/api/load?rootHash=${encodeURIComponent(hash)}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Load failed");
+      // Loaded saves are normal runs — clear any stale daily-run flag so the
+      // leaderboard entry isn't mislabeled as a daily challenge.
+      isDailyRef.current = false;
       setState(normalizeState(data.state as GameState));
       setLoadHash("");
     } catch (err) {
@@ -542,12 +551,16 @@ export default function Game() {
       const target = c.equipped[slot];
       const gi = c.inventory.indexOf(gem);
       if (!target || gi === -1) return prev;
-      const socketed = `${target} ${suffix}`;
-      // replace the equipped item's inventory entry + equip reference, consume the gem
+      // The equipped item must actually exist in inventory; otherwise socketing
+      // would desync equipped/inventory and silently consume the gem.
       const ti = c.inventory.indexOf(target);
-      if (ti !== -1) c.inventory[ti] = socketed;
+      if (ti === -1) return prev;
+      const socketed = `${target} ${suffix}`;
+      // Replace the equipped item's inventory entry + equip reference in place
+      // (no length change), then consume the gem by its captured index.
+      c.inventory[ti] = socketed;
       c.equipped[slot] = socketed;
-      c.inventory.splice(c.inventory.indexOf(gem), 1);
+      c.inventory.splice(gi, 1);
       return { ...prev, character: c, updatedAt: new Date().toISOString() };
     });
   }
@@ -764,9 +777,15 @@ export default function Game() {
           <main className="flex flex-col">
             <div className="mb-3">
               <PixelStage
+                // Remount on run change (new adventure / daily / loaded save) so
+                // combat re-seeds at the correct starting floor/difficulty.
+                // Keyed on seed + createdAt so two runs of the same quest never
+                // collide into a stale (non-remounted) combat instance.
+                key={`run-${state.seed}-${state.createdAt}`}
                 klass={state.character.klass}
                 active={state.status === "playing"}
                 playerHp={state.character.hp}
+                maxHp={state.character.maxHp}
                 level={state.character.level}
                 atkBonus={atkOf(state.character.equipped.weapon) + totalMods(state.character).atk}
                 defBonus={defOf(state.character.equipped.shield) + totalMods(state.character).def}
@@ -827,6 +846,7 @@ export default function Game() {
                   <input
                     value={action}
                     onChange={(e) => setAction(e.target.value)}
+                    maxLength={280}
                     placeholder={busy ? "The GM is deciding..." : "What do you do?"}
                     disabled={busy}
                     className="flex-1 rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none focus:border-violet-400/60 disabled:opacity-60"
@@ -1685,6 +1705,20 @@ function ProofModal({
           This is the proof attached to the GM&apos;s d20 roll of{" "}
           <span className="font-mono text-violet-300">{entry.roll}</span>.
         </p>
+
+        {entry.rng && (
+          <div className="mt-3 rounded-lg border border-violet-400/30 bg-violet-500/5 p-3">
+            <p className="text-xs font-medium text-violet-300">🎲 Provably-fair roll</p>
+            <p className="mt-1 text-[11px] text-white/55">
+              The roll wasn&apos;t chosen by the AI — it&apos;s{" "}
+              <code className="text-violet-200">keccak256(input) mod 20 + 1</code>, derived from the run
+              seed + turn. Recompute it yourself:
+            </p>
+            <p className="mt-1 break-all font-mono text-[11px] text-white/60">input: {entry.rng.input}</p>
+            <p className="mt-0.5 break-all font-mono text-[11px] text-white/60">digest: {entry.rng.digest}</p>
+            <p className="mt-1 text-[11px] text-emerald-300/80">⇒ roll {entry.roll}</p>
+          </div>
+        )}
 
         <dl className="mt-4 space-y-2 text-sm">
           <Row k="Inference">

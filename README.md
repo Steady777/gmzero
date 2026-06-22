@@ -15,12 +15,14 @@ the load-bearing parts on **0G** — and the game does not work the same without
 
 | Layer | 0G primitive | Why it's load-bearing |
 |-------|-------------|------------------------|
-| **The Game Master** | **0G Compute** (verifiable inference) | Every narration + d20 roll — and every floor-clear combat recap — is produced by an LLM on the 0G Compute Network and **TEE-verified** via `processResponse`. Swap it for a normal API and the "provably fair" promise collapses. |
+| **The Game Master** | **0G Compute** (verifiable inference) | Every narration — and every floor-clear combat recap — is produced by an LLM on the 0G Compute Network and **TEE-verified** via `processResponse`. Swap it for a normal API and the "provably fair" promise collapses. |
+| **The dice** | **keccak256 (verifiable RNG)** | The d20 is **not** chosen by the AI. It's derived server-side as `keccak256("GMZero-roll\|<seed>\|<turn>") mod 20 + 1` *before* inference and handed to the model, which may only narrate around it. Anyone can recompute any roll from the seed + turn (the proof chip shows the exact preimage + digest), so the GM literally cannot fudge your odds — and the daily challenge rolls identically for everyone. |
 | **Your save** | **0G Storage** | Character, equipment, inventory, depth, and the full adventure log are written to 0G Storage and addressed by a **Merkle root hash you own**. Saves are portable, not locked in our DB. |
 | **Epic moments & loot** | **0G Chain** | Crits, rare drops, and endings are **anchored** on-chain (keccak digest in tx calldata); epic/legendary loot can be **minted** as an on-chain ownership record `(owner, item)`, and **marketplace sales** are recorded on-chain too `(seller, item, price)` — so "your loot is a real, tradable asset" is literally true and explorer-auditable. |
 
-Open the chip under any turn to see the verification status, provider address, model, and
-verifiability flavor (e.g. `TeeML`) for that exact roll.
+Open the chip under any turn to see the verification status, provider address, model,
+verifiability flavor (e.g. `TeeML`), and the **provably-fair roll** — the keccak preimage +
+digest you can recompute yourself — for that exact roll.
 
 ## Gameplay
 
@@ -50,7 +52,10 @@ Next.js API (Node runtime)
 ```
 
 - `src/lib/game/engine.ts` — GM system/user prompts, combat-recap prompt, strict-JSON parsing + applying outcomes.
+- `src/lib/game/rng.ts` — verifiable dice: deterministic keccak256-derived d20 (the roll the GM is handed, not one it picks).
 - `src/lib/game/items.ts` — item catalog, affixes, gem sockets, sets, boons, shop + marketplace wares, pricing.
+- `src/lib/ratelimit.ts` — per-IP rate limiting that guards the cost-bearing (paid inference / on-chain) routes.
+- Tests: `npm test` (Vitest) covers the GM parser, item/affix/value logic, the verifiable RNG, and the rate limiter.
 - `src/lib/wallet.ts` — browser wallet (MetaMask/EIP-1193): connect, switch to 0G, sign player-owned mint/sale txs.
 - `src/components/PixelStage.tsx` — the canvas dungeon combat (waves, bosses, status effects, telegraphs, FX, audio).
 - `src/app/api/{gm,narrate,save,load,mint,sell,status}/route.ts` — server endpoints (all `runtime = "nodejs"`).

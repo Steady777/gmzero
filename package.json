@@ -6,13 +6,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "overrides": {
+    "ws": "^8.18.3"
   },
   "dependencies": {
     "@0gfoundation/0g-compute-ts-sdk": "^0.8.4",
     "@0gfoundation/0g-ts-sdk": "^1.2.8",
-    "circomlibjs": "^0.1.7",
-    "crypto-js": "^4.2.0",
     "ethers": "^6.13.1",
     "next": "16.2.9",
     "react": "19.2.4",
@@ -20,14 +23,13 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/circomlibjs": "^0.1.6",
-    "@types/crypto-js": "^4.2.2",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.9"
   }
 }

@@ -292,10 +292,24 @@ export const critOf = (name: string | null): number => (name ? itemDef(name).cri
 /** Poison stacks applied on hit by an equipped weapon. */
 export const poisonOf = (name: string | null): number => (name ? itemDef(name).poison ?? 0 : 0);
 
+/**
+ * Composite power score so auto-equip doesn't downgrade a crit/poison weapon to a
+ * slightly-higher-flat-ATK plain one (and vice-versa). Crit is weighted to roughly
+ * its DPS contribution; poison adds sustained damage.
+ */
+function gearScore(slot: ItemSlot, d: ItemDef): number {
+  if (slot === "weapon") {
+    return (d.atk ?? 0) + (d.crit ?? 0) * 20 + (d.poison ?? 0) * 2;
+  }
+  if (slot === "shield") {
+    return (d.def ?? 0) + (d.crit ?? 0) * 20;
+  }
+  return 0;
+}
+
 /** True if `candidate` is a strictly better fit than `current` for the same slot. */
 export function isUpgrade(slot: ItemSlot, candidate: ItemDef, current: ItemDef | null): boolean {
   if (!current) return true;
-  if (slot === "weapon") return (candidate.atk ?? 0) > (current.atk ?? 0);
-  if (slot === "shield") return (candidate.def ?? 0) > (current.def ?? 0);
-  return false;
+  if (slot === "consumable") return false;
+  return gearScore(slot, candidate) > gearScore(slot, current);
 }

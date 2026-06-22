@@ -180,8 +180,17 @@ function mockInference(_system: string, user: string): InferenceResult {
     return mockResult(decision, h);
   }
 
-  const roll = (h % 20) + 1;
-  const action = (user.match(/PLAYER ACTION: (.*)/)?.[1] ?? "act").slice(0, 80);
+  // Honor the server-cast verifiable roll injected into the prompt; only fall
+  // back to a hash-derived roll if (somehow) absent.
+  const predetermined = Number(user.match(/PREDETERMINED ROLL: (\d+)/)?.[1]);
+  const roll = Number.isFinite(predetermined) && predetermined >= 1 && predetermined <= 20
+    ? predetermined
+    : (h % 20) + 1;
+  const action = (
+    user.match(/<<<PLAYER_ACTION>>>\s*([\s\S]*?)\s*<<<END_PLAYER_ACTION>>>/)?.[1] ?? "act"
+  )
+    .trim()
+    .slice(0, 80);
 
   let outcome = "story";
   let hpDelta = 0;

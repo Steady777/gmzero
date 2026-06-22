@@ -193,12 +193,14 @@ const LOG_COLOR: Record<LogKind, string> = {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default function PixelStage({
-  klass, active, playerHp, level, atkBonus, defBonus, critBonus = 0, poisonOnHit = 0,
+  klass, active, playerHp, maxHp, level, atkBonus, defBonus, critBonus = 0, poisonOnHit = 0,
   lifesteal = 0, startFloor = 1, muted = false, onEvent, onFloor,
 }: {
   klass: Character["klass"];
   active: boolean;
   playerHp: number;
+  /** Hero's current max HP — combat heals clamp to this. */
+  maxHp: number;
   level: number;
   /** Attack bonus from the equipped weapon. */
   atkBonus: number;
@@ -225,6 +227,11 @@ export default function PixelStage({
   const heroRef = useRef({ xOff: 0, hitFlash: 0, atkFlash: 0 });
   const floatsRef = useRef<FloatTxt[]>([]);
   const hpRef = useRef(playerHp);
+  const maxHpRef = useRef(maxHp);
+  // The hp value the parent should hold purely from the combat deltas WE've emitted.
+  // Lets the prop-sync effect tell our own echoes (external == 0) apart from genuine
+  // external changes (consumables, boons, descent regen, GM text turns).
+  const reportedHpRef = useRef(playerHp);
   const lvlRef = useRef(level);
   const atkRef = useRef(atkBonus);
   const defRef = useRef(defBonus);
@@ -287,6 +294,7 @@ export default function PixelStage({
   useEffect(() => {
     activeRef.current = active;
     lvlRef.current = level;
+    maxHpRef.current = maxHp;
     atkRef.current = atkBonus;
     defRef.current = defBonus;
     critRef.current = critBonus;
@@ -294,10 +302,24 @@ export default function PixelStage({
     lifestealRef.current = lifesteal;
     onEventRef.current = onEvent;
     onFloorRef.current = onFloor;
-    if (playerHp > 0) hpRef.current = playerHp; // sync narrative HP changes
-    // Note: death is derived from playerHp at render time (see `over`), so we
-    // intentionally avoid setState here.
-  }, [active, playerHp, level, atkBonus, defBonus, critBonus, poisonOnHit, lifesteal, onEvent, onFloor]);
+    // hpRef is the source of truth DURING combat. Combat damage/heal are emitted
+    // as deltas we also fold into reportedHpRef, so when those echo back through
+    // `playerHp` they net to zero here and never clobber hpRef. Anything LEFT OVER
+    // is a genuinely-external change — a consumable, boon, descent regen, or GM
+    // text-turn hp change — so we apply exactly that difference to hpRef. This
+    // works even mid-combat (turn === "busy"), unlike a turn-phase gate.
+    const external = playerHp - reportedHpRef.current;
+    if (external !== 0) {
+      hpRef.current = Math.max(0, Math.min(maxHp, hpRef.current + external));
+      reportedHpRef.current = playerHp;
+    }
+  }, [active, playerHp, maxHp, level, atkBonus, defBonus, critBonus, poisonOnHit, lifesteal, onEvent, onFloor]);
+
+  /** Emit a combat hp delta to the parent AND record it so the prop echo nets to zero. */
+  const emitHpDelta = (delta: number) => {
+    reportedHpRef.current = Math.max(0, Math.min(maxHpRef.current, reportedHpRef.current + delta));
+    onEventRef.current({ hpDelta: delta });
+  };
 
   const refreshView = useCallback(() => {
     setEnemyView(
@@ -588,10 +610,10 @@ export default function PixelStage({
     // Lifesteal: heal the hero for a fraction of damage dealt.
     if (lifestealRef.current > 0) {
       const heal = Math.max(1, Math.floor(dmg * lifestealRef.current));
-      hpRef.current = Math.min(hpRef.current + heal, 9999);
+      hpRef.current = Math.min(hpRef.current + heal, maxHpRef.current);
       heroRef.current.atkFlash = 120;
       float(HERO_X, HERO_Y - 8, `+${heal}`, "#7be0a0");
-      onEventRef.current({ hpDelta: heal });
+      emitHpDelta(heal);
     }
     if (poisonHitRef.current > 0) {
       e.poison += poisonHitRef.current;
@@ -634,7 +656,7 @@ export default function PixelStage({
     float(HERO_X, HERO_Y, `-${dmg}`, "#ff4d4d");
     spawnSparks(HERO_X + 12, HERO_Y + 12, "#ff6b6b", 7);
     shake(dmg >= 6 ? 7 : 4); playSfx("hurt");
-    onEventRef.current({ hpDelta: -dmg });
+    emitHpDelta(-dmg);
     const blocked = defendRef.current || defRef.current > 0;
     let extra = "";
     if (opts?.poison) { heroPoisonRef.current += opts.poison; extra += " · poisoned"; }
@@ -721,7 +743,7 @@ export default function PixelStage({
       if (heroPoisonRef.current > 0) heroPoisonRef.current -= 1;
       if (heroBurnRef.current > 0) heroBurnRef.current -= 1;
       float(HERO_X, HERO_Y - 6, `-${dot}`, burning ? "#ff8a3a" : "#8be08b");
-      onEventRef.current({ hpDelta: -dot });
+      emitHpDelta(-dot);
       pushLog(`${burning ? "Flames sear you" : "Poison courses through you"} (-${dot}).`, "enemy");
       if (hpRef.current <= 0) { setTurn("over"); playSfx("death"); pushLog("You succumb…", "warn"); return; }
     }

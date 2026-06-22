@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 import { runInference } from "@/lib/0g/compute";
 import { buildCombatNarrationPrompt, buildSystemPrompt, parseDecision } from "@/lib/game/engine";
 import type { GameState, LogEntry } from "@/lib/game/types";
+import { enforceRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const MAX_SUMMARY_LEN = 600;
 
 /**
  * Narrate a just-finished local combat floor as one verifiable GM inference.
@@ -12,6 +15,8 @@ export const dynamic = "force-dynamic";
  * produces narration + a verifiability proof — it does NOT mutate the character.
  */
 export async function POST(req: Request) {
+  const limited = enforceRateLimit(req, "narrate", 20, 60_000);
+  if (limited) return limited;
   try {
     const { state, summary } = (await req.json()) as { state: GameState; summary: string };
     if (!state?.character || typeof summary !== "string" || !summary.trim()) {
@@ -19,7 +24,7 @@ export async function POST(req: Request) {
     }
 
     const system = buildSystemPrompt();
-    const user = buildCombatNarrationPrompt(state, summary.trim());
+    const user = buildCombatNarrationPrompt(state, summary.trim().slice(0, MAX_SUMMARY_LEN));
     const { content, proof } = await runInference(system, user);
     const decision = parseDecision(content);
 
@@ -39,9 +44,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ entry });
   } catch (err) {
     console.error("[/api/narrate]", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Combat narration failed" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Combat narration failed" }, { status: 500 });
   }
 }

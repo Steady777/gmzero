@@ -25,7 +25,8 @@ export async function saveJson(obj: unknown): Promise<SaveResult> {
   const bytes = new TextEncoder().encode(JSON.stringify(obj));
 
   if (resolveMode() === "mock") {
-    const rootHash = "0xmock" + keccakish(bytes);
+    // Real keccak digest so two distinct saves can't collide and overwrite.
+    const rootHash = "0xmock" + ethers.keccak256(bytes).slice(2, 42);
     await fs.mkdir(MOCK_DIR, { recursive: true });
     await fs.writeFile(path.join(MOCK_DIR, `${rootHash}.json`), bytes);
     return { rootHash, txHash: null, mode: "mock" };
@@ -50,7 +51,13 @@ export async function saveJson(obj: unknown): Promise<SaveResult> {
 /** Retrieve a JSON object previously stored under `rootHash`. */
 export async function loadJson<T>(rootHash: string): Promise<T> {
   if (resolveMode() === "mock" || rootHash.startsWith("0xmock")) {
-    const buf = await fs.readFile(path.join(MOCK_DIR, `${rootHash}.json`), "utf8");
+    // Defense-in-depth: confine the read to MOCK_DIR even if a caller forgot to
+    // validate `rootHash`, so traversal segments can never escape the dir.
+    const file = path.join(MOCK_DIR, `${rootHash}.json`);
+    if (!path.resolve(file).startsWith(path.resolve(MOCK_DIR) + path.sep)) {
+      throw new Error("Invalid rootHash");
+    }
+    const buf = await fs.readFile(file, "utf8");
     return JSON.parse(buf) as T;
   }
 
@@ -59,15 +66,4 @@ export async function loadJson<T>(rootHash: string): Promise<T> {
   if (err || !blob) throw err ?? new Error("download returned no data");
   const text = await blob.text();
   return JSON.parse(text) as T;
-}
-
-/** Cheap non-cryptographic content tag for mock root hashes. */
-function keccakish(bytes: Uint8Array): string {
-  let h1 = 0x811c9dc5;
-  let h2 = 0x1000193;
-  for (let i = 0; i < bytes.length; i++) {
-    h1 = Math.imul(h1 ^ bytes[i], 0x1000193) >>> 0;
-    h2 = Math.imul(h2 + bytes[i] + i, 0x85ebca6b) >>> 0;
-  }
-  return (h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0")).padStart(40, "0");
 }

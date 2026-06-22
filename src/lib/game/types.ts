@@ -59,6 +59,16 @@ export interface LogEntry {
   proof: TurnProof;
   /** On-chain anchor of this outcome (epic moments only). */
   anchor: AnchorInfo | null;
+  /** Verifiable-roll provenance: the keccak digest + preimage anyone can recompute. */
+  rng?: RollProvenance | null;
+}
+
+/** Provenance for a verifiable d20 roll (see src/lib/game/rng.ts). */
+export interface RollProvenance {
+  /** keccak256 of `input`, the recomputable commitment. */
+  digest: string;
+  /** Exact preimage string: `GMZero-roll|<seed>|<turn>`. */
+  input: string;
 }
 
 export interface TurnProof {
