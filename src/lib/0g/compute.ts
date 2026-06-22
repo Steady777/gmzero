@@ -188,7 +188,7 @@ function mockInference(_system: string, user: string): InferenceResult {
   let goldDelta = 0;
   const itemsGained: { name: string; rarity: string }[] = [];
   const itemsLost: string[] = [];
-  let ending = "";
+  const ending = "";
   let flavor: string;
 
   if (roll === 1) {
@@ -215,8 +215,7 @@ function mockInference(_system: string, user: string): InferenceResult {
     goldDelta = 40 + (h % 30);
     itemsGained.push({ name: pick(h, ["Crown of Varnholt", "Wyrmsteel Blade", "Heart of the Deep"]), rarity: "legendary" });
     hpDelta = 5;
-    ending = "victory";
-    flavor = `A perfect, decisive stroke — you ${action} and the quest itself turns on this moment. The goal is yours: ${goal}.`;
+    flavor = `A perfect, decisive stroke — you ${action} and seize a legendary prize toward your goal: ${goal}.`;
   } else {
     outcome = "loot";
     goldDelta = 15 + (h % 20);

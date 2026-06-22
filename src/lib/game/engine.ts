@@ -121,16 +121,12 @@ export function applyDecision(
     c.hp = Math.min(c.maxHp, c.hp + 4);
   }
 
-  // Resolve run status: death overrides a declared victory.
+  // Open-ended adventure: no "clear/victory" state — only death ends a run.
   let status: GameState["status"] = "playing";
-  let ending: LogEntry["ending"] = decision.ending === "" ? null : decision.ending;
-  if (c.hp <= 0) {
+  let ending: LogEntry["ending"] = null;
+  if (c.hp <= 0 || decision.ending === "defeat") {
     status = "defeat";
     ending = "defeat";
-  } else if (decision.ending === "victory") {
-    status = "victory";
-  } else if (decision.ending === "defeat") {
-    status = "defeat";
   }
 
   const entry: LogEntry = {

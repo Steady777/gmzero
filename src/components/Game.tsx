@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import PixelStage, { type CombatEvent } from "@/components/PixelStage";
 import {
   BEGIN_ACTION,
   newCharacter,
@@ -157,6 +158,18 @@ export default function Game() {
     }
   }
 
+  function handleCombat(e: CombatEvent) {
+    setState((prev) => {
+      if (!prev) return prev;
+      const c = { ...prev.character, inventory: [...prev.character.inventory] };
+      if (e.hpDelta) c.hp = Math.max(0, Math.min(c.maxHp, c.hp + e.hpDelta));
+      if (e.goldDelta) c.gold = Math.max(0, c.gold + e.goldDelta);
+      if (e.loot) c.inventory.push(e.loot.name);
+      const status = c.hp <= 0 ? "defeat" : prev.status;
+      return { ...prev, character: c, status, updatedAt: new Date().toISOString() };
+    });
+  }
+
   const lastSuggestions = state?.log.at(-1)?.suggestions ?? [];
 
   return (
@@ -184,6 +197,15 @@ export default function Game() {
       ) : (
         <div className="mt-6 grid gap-5 md:grid-cols-[1fr_280px]">
           <main className="flex flex-col">
+            <div className="mb-3">
+              <PixelStage
+                klass={state.character.klass}
+                active={state.status === "playing"}
+                playerHp={state.character.hp}
+                level={state.character.level}
+                onEvent={handleCombat}
+              />
+            </div>
             <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-violet-300/70">
               <span className="rounded bg-violet-500/15 px-2 py-0.5">Quest</span>
               <span>{state.seed}</span>
