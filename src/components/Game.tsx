@@ -271,6 +271,8 @@ export default function Game() {
   const [board, setBoard] = useState<RunEntry[]>([]);
   const [meta, setMeta] = useState<Meta>({ echoes: 0, unlocks: [] });
   const [dailyDecree, setDailyDecree] = useState<string | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [tutorial, setTutorial] = useState(false);
   const lastRunIdRef = useRef<string | null>(null);
   const recordedRef = useRef(false);
   const isDailyRef = useRef(false);
@@ -290,7 +292,34 @@ export default function Game() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBoard(loadBoard());
     setMeta(loadMeta());
+    try {
+      setMuted(localStorage.getItem("gmzero.muted") === "1");
+      if (localStorage.getItem("gmzero.tutorialSeen") !== "1") setTutorial(true);
+    } catch {
+      /* ignore */
+    }
   }, []);
+
+  function toggleMute() {
+    setMuted((m) => {
+      const next = !m;
+      try {
+        localStorage.setItem("gmzero.muted", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
+
+  function dismissTutorial() {
+    setTutorial(false);
+    try {
+      localStorage.setItem("gmzero.tutorialSeen", "1");
+    } catch {
+      /* ignore */
+    }
+  }
 
   // Record a run to the local leaderboard once it ends (defeat/victory).
   useEffect(() => {
@@ -698,7 +727,14 @@ export default function Game() {
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6">
-      <Header status={status} wallet={wallet} connecting={connecting} onConnect={onConnectWallet} />
+      <Header
+        status={status}
+        wallet={wallet}
+        connecting={connecting}
+        onConnect={onConnectWallet}
+        muted={muted}
+        onToggleMute={toggleMute}
+      />
 
       {error && (
         <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-200">
@@ -738,6 +774,7 @@ export default function Game() {
                 poisonOnHit={poisonOf(state.character.equipped.weapon) + totalMods(state.character).poison}
                 lifesteal={totalMods(state.character).lifesteal}
                 startFloor={state.depth}
+                muted={muted}
                 onEvent={handleCombat}
                 onFloor={handleFloor}
               />
@@ -862,6 +899,35 @@ export default function Game() {
         />
       )}
       {boonOffer && <BoonModal choices={boonOffer} onPick={pickBoon} />}
+      {tutorial && <TutorialModal onClose={dismissTutorial} />}
+    </div>
+  );
+}
+
+function TutorialModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-2xl border border-violet-400/30 bg-[#12101c] p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-semibold">
+          Welcome to GM<span className="text-violet-400">Zero</span>
+        </h3>
+        <p className="mt-1 text-xs text-white/50">A verifiable AI dungeon RPG on 0G.</p>
+        <ul className="mt-4 space-y-2 text-sm text-white/80">
+          <li>⚔️ <b>Fight</b> through floors — Attack, a class Skill, or Defend. Clear 3 waves to face a boss, then descend. Depth is your score.</li>
+          <li>🎲 The <b>Game Master</b> narrates and rolls a fair d20 — each turn is TEE-verified on 0G Compute (tap the ⛓ chip).</li>
+          <li>💎 <b>Loot</b> drops gear with affixes; <b>mint</b> the rare ones and <b>sell</b> them in the 🛒 marketplace — recorded on 0G Chain.</li>
+          <li>🔗 <b>Connect a wallet</b> to truly own what you mint &amp; trade. ⭐ Pick <b>boons</b> on each floor; spend <b>Echoes</b> in the Sanctum.</li>
+        </ul>
+        <button
+          onClick={onClose}
+          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
+        >
+          Enter the dungeon
+        </button>
+      </div>
     </div>
   );
 }
@@ -869,7 +935,7 @@ export default function Game() {
 function BoonModal({ choices, onPick }: { choices: Boon[]; onPick: (b: Boon) => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-violet-400/30 bg-[#12101c] p-6">
+      <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-violet-400/30 bg-[#12101c] p-6">
         <h3 className="text-lg font-semibold">⭐ Choose a boon</h3>
         <p className="mt-1 text-xs text-white/50">You cleared a floor. Pick one lasting blessing for this run.</p>
         <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -1000,7 +1066,7 @@ function ShopModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
       <div
-        className="w-full max-w-md rounded-2xl border border-white/15 bg-[#12101c] p-5"
+        className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-[#12101c] p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
@@ -1047,11 +1113,15 @@ function Header({
   wallet,
   connecting,
   onConnect,
+  muted,
+  onToggleMute,
 }: {
   status: Status | null;
   wallet: string | null;
   connecting: boolean;
   onConnect: () => void;
+  muted: boolean;
+  onToggleMute: () => void;
 }) {
   const live = status?.mode === "live";
   return (
@@ -1063,6 +1133,14 @@ function Header({
         <p className="text-xs text-white/50">Verifiable AI Game Master · powered by 0G</p>
       </div>
       <div className="flex items-center gap-2">
+        <button
+          onClick={onToggleMute}
+          className="rounded-full bg-white/5 px-2.5 py-1 text-xs text-white/60 transition hover:bg-white/10"
+          title={muted ? "Unmute" : "Mute"}
+          aria-label={muted ? "Unmute" : "Mute"}
+        >
+          {muted ? "🔇" : "🔊"}
+        </button>
         <span
           className={`rounded-full px-3 py-1 text-xs font-medium ${
             live

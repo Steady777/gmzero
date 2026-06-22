@@ -24,12 +24,13 @@ verifiability flavor (e.g. `TeeML`) for that exact roll.
 
 ## Gameplay
 
-- **Pixel combat** — turn-based battles on a canvas: Attack, a class skill (Cleave/Firebolt/Backstab/Volley), and Defend. Crits (class- and weapon-scaled) and poison DoT, with screen shake, hit-spark particles, and a tiny Web Audio synth for feedback.
-- **Depth & bosses** — clear 3 waves to face a scaling boss, then descend. Enemies grow stronger each floor and **depth is your score**.
-- **Equipment** — weapons add ATK, shields reduce incoming damage. Drops can roll **affixes** (`Sharp …`, `… of Fury`) that stack stats and bump rarity; better gear auto-equips.
-- **Economy** — a between-floor **shop** spends gold on potions and gear; **consumables** (Healing Herb, Crystal Vial) restore HP.
-- **Mint your loot** — epic/legendary items get a ⛓ Mint button that records ownership on 0G Chain.
-- **Marketplace (0G Bazaar)** — minted loot can be sold for gold (each sale recorded on 0G Chain), and a buy side stocks high-end gear. *Global cross-player trading would settle through an ERC-721 + escrow contract — a follow-up.*
+- **Pixel combat** — turn-based battles on a canvas: Attack, a class skill (Cleave/Firebolt/Backstab/Volley), and Defend. Crits, plus **status effects** (poison, burn, stun) — Firebolt burns, Cleave stuns, Backstab poisons. Screen shake, hit-spark particles, ambient music + SFX (with a mute toggle).
+- **Enemies & bosses** — slimes, bats, skeletons, imps, wraiths with distinct behaviors (bats evade, slimes poison, wraiths life-drain). Foes **telegraph specials** a turn ahead (⚡), bosses **enrage** below half HP. Clear 3 waves → scaling boss → descend. Floor themes shift with depth; **depth is your score**.
+- **Equipment & loadout** — weapons add ATK, shields reduce damage. Drops roll **affixes** (`Sharp …`, `… of Fury`); **gem sockets** (Ruby/Sapphire/…) infuse equipped gear; matching weapon+shield form **set bonuses**.
+- **Roguelike progression** — pick a **boon** on every floor clear (ATK, crit, lifesteal, +max HP, regen…). Earn **Echoes** each run and spend them in the **Sanctum** on permanent unlocks. Play the **Daily challenge** — a fixed dungeon + decree for everyone that day.
+- **Economy** — a between-floor **shop** + **consumables** restore/upgrade; gold funds the marketplace.
+- **Own your loot (wallet)** — **connect a wallet** and minting/selling are signed and paid by *your own wallet* on 0G Chain — the asset is genuinely yours (server key / mock is the fallback).
+- **Mint & marketplace (0G Bazaar)** — mint epic/legendary loot as an on-chain record, then sell it for gold (each sale recorded on 0G Chain); a buy side stocks high-end gear. *Global cross-player trading would settle through an ERC-721 + escrow contract — a follow-up.*
 - **Leaderboard** — deepest runs are kept locally and can be published to 0G Storage, then reloaded by anyone with the root hash.
 
 ## Architecture
@@ -49,8 +50,9 @@ Next.js API (Node runtime)
 ```
 
 - `src/lib/game/engine.ts` — GM system/user prompts, combat-recap prompt, strict-JSON parsing + applying outcomes.
-- `src/lib/game/items.ts` — item catalog, affix parsing/rolling, shop + marketplace wares, pricing.
-- `src/components/PixelStage.tsx` — the canvas dungeon combat (waves, bosses, crit/poison, FX).
+- `src/lib/game/items.ts` — item catalog, affixes, gem sockets, sets, boons, shop + marketplace wares, pricing.
+- `src/lib/wallet.ts` — browser wallet (MetaMask/EIP-1193): connect, switch to 0G, sign player-owned mint/sale txs.
+- `src/components/PixelStage.tsx` — the canvas dungeon combat (waves, bosses, status effects, telegraphs, FX, audio).
 - `src/app/api/{gm,narrate,save,load,mint,sell,status}/route.ts` — server endpoints (all `runtime = "nodejs"`).
 
 ## Run it

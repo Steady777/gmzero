@@ -183,7 +183,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default function PixelStage({
   klass, active, playerHp, level, atkBonus, defBonus, critBonus = 0, poisonOnHit = 0,
-  lifesteal = 0, startFloor = 1, onEvent, onFloor,
+  lifesteal = 0, startFloor = 1, muted = false, onEvent, onFloor,
 }: {
   klass: Character["klass"];
   active: boolean;
@@ -201,6 +201,8 @@ export default function PixelStage({
   lifesteal?: number;
   /** Floor to start the dive on (e.g. resuming a save's depth). */
   startFloor?: number;
+  /** Mute all SFX + ambient music. */
+  muted?: boolean;
   onEvent: (e: CombatEvent) => void;
   /** Fired when the hero clears a floor and descends to a deeper one. */
   onFloor: (depth: number) => void;
@@ -232,6 +234,32 @@ export default function PixelStage({
   const shakeRef = useRef(0);
   const sparksRef = useRef<Spark[]>([]);
   const audioRef = useRef<AudioContext | null>(null);
+  const mutedRef = useRef(muted);
+  useEffect(() => { mutedRef.current = muted; }, [muted]);
+
+  // Ambient background music — a slow arpeggio, gated by mute. Begins once the
+  // AudioContext is unlocked by the first SFX (a user gesture).
+  useEffect(() => {
+    if (muted) return;
+    const scale = [130.81, 155.56, 196.0, 233.08, 261.63];
+    let i = 0;
+    const id = window.setInterval(() => {
+      const ac = audioRef.current;
+      if (mutedRef.current || !ac || ac.state !== "running") return;
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(scale[i % scale.length] * (i % 8 < 4 ? 1 : 2), ac.currentTime);
+      gain.gain.setValueAtTime(0.0001, ac.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.02, ac.currentTime + 0.4);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 1.8);
+      osc.connect(gain).connect(ac.destination);
+      osc.start();
+      osc.stop(ac.currentTime + 1.9);
+      i++;
+    }, 1700);
+    return () => window.clearInterval(id);
+  }, [muted]);
 
   // UI state (buttons / log)
   const [turn, setTurn] = useState<Turn>("player");
@@ -286,6 +314,7 @@ export default function PixelStage({
 
   // Lazy Web Audio — a tiny synth so combat has feedback without any asset files.
   const playSfx = (type: "hit" | "crit" | "loot" | "boss" | "hurt" | "death") => {
+    if (mutedRef.current) return;
     try {
       const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!audioRef.current) audioRef.current = new Ctx();
@@ -441,7 +470,8 @@ export default function PixelStage({
         const scale = e.boss ? SCALE * 2 : SCALE;
         // Bosses are 2x — offset so the bigger sprite still rests on the floor.
         const bx = e.boss ? -16 : 0, by = e.boss ? -16 : 0;
-        const ex = e.x + e.xOff + bx, ey = e.y + bob + by;
+        const sink = e.dead ? (e.deadT / 320) * 12 : 0; // death animation: sink + fade
+        const ex = e.x + e.xOff + bx, ey = e.y + bob + by + sink;
         const w = SPRITE * scale, barW = e.boss ? 44 : 24;
         ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fillRect(ex + w / 2 - 10, e.y + 30, 20, 4);
         const tint = e.hitFlash > 0 ? "#ffffff" : e.boss ? "#ffd1d1" : undefined;
@@ -463,11 +493,12 @@ export default function PixelStage({
         }
       }
 
-      // hero
+      // hero (subtle idle bob for life; no bob mid-swing)
       const hx = HERO_X + hero.xOff;
+      const hbob = hero.atkFlash > 0 ? 0 : Math.sin(anim / 300) * 1.2;
       ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.fillRect(hx + 6, HERO_Y + 30, 20, 4);
       const tint = hero.hitFlash > 0 ? "#ff5a5a" : hero.atkFlash > 0 ? "#fff2c0" : undefined;
-      drawPix(hero.atkFlash > 0 ? HERO_ATK : HERO_A, heroPal, hx, HERO_Y, false, tint);
+      drawPix(hero.atkFlash > 0 ? HERO_ATK : HERO_A, heroPal, hx, HERO_Y + hbob, false, tint);
 
       // hit-spark particles
       for (let i = sparksRef.current.length - 1; i >= 0; i--) {
