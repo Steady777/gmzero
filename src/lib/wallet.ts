@@ -76,6 +76,38 @@ export async function connectWallet(): Promise<WalletConn> {
   return { address, signer };
 }
 
+/**
+ * Silently return the already-authorized address WITHOUT prompting (eth_accounts).
+ * Used to restore a connection on page load / navigation so the user stays
+ * connected until they explicitly disconnect.
+ */
+export async function getConnectedAddress(): Promise<string | null> {
+  const eth = getEthereum();
+  if (!eth) return null;
+  try {
+    const accounts = (await eth.request({ method: "eth_accounts" })) as string[];
+    return accounts?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Subscribe to wallet account changes. Fires with the new primary address, or
+ * null when the user disconnects all accounts from the site. Returns an
+ * unsubscribe function.
+ */
+export function onAccountsChanged(handler: (address: string | null) => void): () => void {
+  const eth = getEthereum();
+  if (!eth?.on || !eth.removeListener) return () => {};
+  const listener = (...args: unknown[]) => {
+    const accounts = args[0] as string[] | undefined;
+    handler(accounts?.[0] ?? null);
+  };
+  eth.on("accountsChanged", listener);
+  return () => eth.removeListener?.("accountsChanged", listener);
+}
+
 /** Re-acquire a signer for the already-connected wallet (per action). */
 export async function getSigner(): Promise<WalletConn> {
   const eth = getEthereum();

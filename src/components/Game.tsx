@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import PixelStage, { type CombatEvent } from "@/components/PixelStage";
-import { connectWallet, mintItemWithWallet, sellItemWithWallet, shortAddr } from "@/lib/wallet";
+import {
+  connectWallet,
+  getConnectedAddress,
+  mintItemWithWallet,
+  onAccountsChanged,
+  sellItemWithWallet,
+  shortAddr,
+} from "@/lib/wallet";
 import {
   activeSet,
   atkOf,
@@ -113,6 +120,12 @@ function makeDailyGame(name: string, klass: Character["klass"]): { game: GameSta
 }
 
 /** Backfill fields that may be absent in older saves loaded from 0G Storage. */
+/** True if a wallet error is the user rejecting the signature (EIP-1193 4001 / ethers ACTION_REJECTED). */
+function isUserRejection(e: unknown): boolean {
+  const code = (e as { code?: unknown })?.code;
+  return code === 4001 || code === "ACTION_REJECTED";
+}
+
 function normalizeState(s: GameState): GameState {
   const c = s.character;
   // Backfill hp/maxHp defensively — a malformed external save with a missing
@@ -225,6 +238,7 @@ function applyUnlocks(c: Character, unlocks: string[]): Character {
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
 const BOARD_KEY = "gmzero.leaderboard";
+const WALLET_KEY = "gmzero.wallet";
 
 function loadBoard(): RunEntry[] {
   if (typeof window === "undefined") return [];
@@ -257,6 +271,7 @@ export default function Game() {
   const [action, setAction] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [lastSave, setLastSave] = useState<{
     rootHash: string;
@@ -288,6 +303,30 @@ export default function Game() {
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // Keep the wallet connected across reloads / page navigation: silently restore
+  // the authorized account on mount, and track account changes. Only an explicit
+  // disconnect (or the user revoking access in their wallet) drops it.
+  useEffect(() => {
+    let remembered = false;
+    try { remembered = localStorage.getItem(WALLET_KEY) === "1"; } catch {}
+    if (remembered) {
+      getConnectedAddress().then((addr) => {
+        if (addr) setWallet(addr);
+        else { try { localStorage.removeItem(WALLET_KEY); } catch {} } // access revoked in-wallet
+      });
+    }
+    const unsub = onAccountsChanged((addr) => {
+      if (addr) {
+        setWallet(addr);
+        try { localStorage.setItem(WALLET_KEY, "1"); } catch {}
+      } else {
+        setWallet(null);
+        try { localStorage.removeItem(WALLET_KEY); } catch {}
+      }
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     fetch("/api/status")
@@ -587,6 +626,8 @@ export default function Game() {
     try {
       const { address } = await connectWallet();
       setWallet(address);
+      // Remember intent so the connection is restored across reloads / navigation.
+      try { localStorage.setItem(WALLET_KEY, "1"); } catch {}
     } catch (err) {
       setError(err instanceof Error ? err.message : "Wallet connection failed");
     } finally {
@@ -594,27 +635,51 @@ export default function Game() {
     }
   }
 
+  /** Explicit disconnect — the only thing that drops the connection. */
+  function onDisconnect() {
+    setWallet(null);
+    try { localStorage.removeItem(WALLET_KEY); } catch {}
+  }
+
+  /** Mint/sale via the server relay; `owner` records the player's address on-chain. */
+  async function serverMint(name: string, owner?: string): Promise<MintInfo> {
+    const res = await fetch("/api/mint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item: name, seed: stateRef.current?.seed ?? "", owner }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "Mint failed");
+    return data.mint as MintInfo;
+  }
+
   /**
-   * Mint loot on 0G Chain. If a wallet is connected, the *player* signs and owns
-   * it; otherwise the server key (or mock) records it.
+   * Mint loot on 0G Chain. If a wallet is connected, the *player* signs and pays so
+   * the loot is genuinely theirs. If that wallet can't pay gas (no testnet OG), the
+   * server relays the mint while still recording the player's address as owner — so
+   * live mode is fully testable without a faucet.
    */
   async function mintLoot(name: string) {
     if (minting) return;
     setMinting(name);
     setError(null);
+    setNotice(null);
     try {
       let mint: MintInfo;
       if (wallet) {
-        mint = await mintItemWithWallet(name, stateRef.current?.seed ?? "");
+        try {
+          mint = await mintItemWithWallet(name, stateRef.current?.seed ?? "");
+        } catch (e) {
+          if (isUserRejection(e)) return; // player declined the signature — do nothing
+          // Wallet couldn't pay gas (no OG) → relay through the server, keep player as owner.
+          mint = await serverMint(name, wallet);
+          setNotice(
+            `Minted via server relay — your wallet couldn't pay gas. Recorded owner ${shortAddr(wallet)}. ` +
+              `To mint from your own wallet you need testnet OG (~3 OG): grab some at faucet.0g.ai.`,
+          );
+        }
       } else {
-        const res = await fetch("/api/mint", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item: name, seed: stateRef.current?.seed ?? "" }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Mint failed");
-        mint = data.mint as MintInfo;
+        mint = await serverMint(name);
       }
       setMints((m) => ({ ...m, [name]: mint }));
     } catch (err) {
@@ -630,19 +695,32 @@ export default function Game() {
     const price = marketValue(name);
     setSelling(name);
     setError(null);
+    setNotice(null);
     try {
       let sale: SaleInfo;
-      if (wallet) {
-        sale = await sellItemWithWallet(name, price, stateRef.current?.seed ?? "");
-      } else {
+      const serverSell = async (seller?: string): Promise<SaleInfo> => {
         const res = await fetch("/api/sell", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item: name, price, seed: stateRef.current?.seed ?? "" }),
+          body: JSON.stringify({ item: name, price, seed: stateRef.current?.seed ?? "", seller }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Sale failed");
-        sale = data.sale as SaleInfo;
+        return data.sale as SaleInfo;
+      };
+      if (wallet) {
+        try {
+          sale = await sellItemWithWallet(name, price, stateRef.current?.seed ?? "");
+        } catch (e) {
+          if (isUserRejection(e)) return; // player declined — do nothing
+          sale = await serverSell(wallet);
+          setNotice(
+            `Sale recorded via server relay — your wallet couldn't pay gas. Recorded seller ${shortAddr(wallet)}. ` +
+              `For wallet-signed trades you need testnet OG (~3 OG) from faucet.0g.ai.`,
+          );
+        }
+      } else {
+        sale = await serverSell();
       }
       setLastSale(sale);
       setState((prev) => {
@@ -745,6 +823,7 @@ export default function Game() {
         wallet={wallet}
         connecting={connecting}
         onConnect={onConnectWallet}
+        onDisconnect={onDisconnect}
         muted={muted}
         onToggleMute={toggleMute}
       />
@@ -752,6 +831,12 @@ export default function Game() {
       {error && (
         <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-200">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="mt-4 flex items-start justify-between gap-3 rounded-lg border border-sky-400/40 bg-sky-500/10 px-4 py-2 text-sm text-sky-200">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-sky-300/60 hover:text-sky-100">✕</button>
         </div>
       )}
 
@@ -940,6 +1025,7 @@ function TutorialModal({ onClose }: { onClose: () => void }) {
           <li>🎲 The <b>Game Master</b> narrates and rolls a fair d20 — each turn is TEE-verified on 0G Compute (tap the ⛓ chip).</li>
           <li>💎 <b>Loot</b> drops gear with affixes; <b>mint</b> the rare ones and <b>sell</b> them in the 🛒 marketplace — recorded on 0G Chain.</li>
           <li>🔗 <b>Connect a wallet</b> to truly own what you mint &amp; trade. ⭐ Pick <b>boons</b> on each floor; spend <b>Echoes</b> in the Sanctum.</li>
+          <li>⛽ Wallet-signed minting needs <b>~3 testnet OG</b> for gas (<a href="https://faucet.0g.ai" target="_blank" rel="noreferrer" className="text-violet-300 underline">faucet.0g.ai</a>). No OG? It still works — the server relays the tx and records <b>your</b> address as owner.</li>
         </ul>
         <button
           onClick={onClose}
@@ -1133,6 +1219,7 @@ function Header({
   wallet,
   connecting,
   onConnect,
+  onDisconnect,
   muted,
   onToggleMute,
 }: {
@@ -1140,6 +1227,7 @@ function Header({
   wallet: string | null;
   connecting: boolean;
   onConnect: () => void;
+  onDisconnect: () => void;
   muted: boolean;
   onToggleMute: () => void;
 }) {
@@ -1172,12 +1260,14 @@ function Header({
           {live ? "● LIVE on 0G" : "● MOCK mode"}
         </span>
         {wallet ? (
-          <span
-            className="rounded-full bg-violet-500/15 px-3 py-1 text-xs font-medium text-violet-200 ring-1 ring-violet-400/40"
-            title={`Connected — loot you mint/sell is owned by ${wallet}`}
+          <button
+            onClick={onDisconnect}
+            className="group rounded-full bg-violet-500/15 px-3 py-1 text-xs font-medium text-violet-200 ring-1 ring-violet-400/40 transition hover:bg-red-500/15 hover:text-red-200 hover:ring-red-400/40"
+            title={`Connected — loot you mint/sell is owned by ${wallet}. Click to disconnect.`}
           >
-            🔗 {shortAddr(wallet)}
-          </span>
+            <span className="group-hover:hidden">🔗 {shortAddr(wallet)}</span>
+            <span className="hidden group-hover:inline">✕ Disconnect</span>
+          </button>
         ) : (
           <button
             onClick={onConnect}

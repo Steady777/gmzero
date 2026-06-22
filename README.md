@@ -31,7 +31,7 @@ digest you can recompute yourself — for that exact roll.
 - **Equipment & loadout** — weapons add ATK, shields reduce damage. Drops roll **affixes** (`Sharp …`, `… of Fury`); **gem sockets** (Ruby/Sapphire/…) infuse equipped gear; matching weapon+shield form **set bonuses**.
 - **Roguelike progression** — pick a **boon** on every floor clear (ATK, crit, lifesteal, +max HP, regen…). Earn **Echoes** each run and spend them in the **Sanctum** on permanent unlocks. Play the **Daily challenge** — a fixed dungeon + decree for everyone that day.
 - **Economy** — a between-floor **shop** + **consumables** restore/upgrade; gold funds the marketplace.
-- **Own your loot (wallet)** — **connect a wallet** and minting/selling are signed and paid by *your own wallet* on 0G Chain — the asset is genuinely yours (server key / mock is the fallback).
+- **Own your loot (wallet)** — **connect a wallet** and minting/selling are signed and paid by *your own wallet* on 0G Chain — the asset is genuinely yours. The connection persists across reloads/navigation until you explicitly disconnect (click the address pill). **To mint/trade from your own wallet you need ~3 testnet OG for gas** ([faucet.0g.ai](https://faucet.0g.ai)); if your wallet has no OG, the server relays the tx and still records **your** address as owner, so live mode is fully testable without a faucet (server key / mock is the ultimate fallback).
 - **Mint & marketplace (0G Bazaar)** — mint epic/legendary loot as an on-chain record, then sell it for gold (each sale recorded on 0G Chain); a buy side stocks high-end gear. *Global cross-player trading would settle through an ERC-721 + escrow contract — a follow-up.*
 - **Leaderboard** — deepest runs are kept locally and can be published to 0G Storage, then reloaded by anyone with the root hash.
 
@@ -85,6 +85,14 @@ On first live turn the app creates a compute ledger, picks a TEE-verifiable prov
 acknowledges it on-chain, funds a per-provider sub-account, then runs verified inference.
 "Save adventure" writes to 0G Storage and returns your root hash + a storagescan tx link.
 Storage upload and Chain anchor/mint only need gas; the TEE-verified GM needs the 3 OG ledger.
+
+**Playing live without your own OG.** The *server* wallet pays for GM turns, saves, and
+anchors, so a player needs no funds to play. Minting/selling is signed by the *player's*
+connected wallet — which needs **~3 testnet OG for gas** to do it for real. If the connected
+wallet has no OG, the app automatically **relays the mint/sale through the server** while still
+recording the player's address as the on-chain owner/seller — so the full live flow is testable
+without a faucet. The wallet stays connected across reloads/navigation until you click the
+address pill to disconnect.
 
 ### Verify the live integration
 

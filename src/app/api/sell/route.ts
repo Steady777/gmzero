@@ -13,15 +13,23 @@ export async function POST(req: Request) {
   const limited = enforceRateLimit(req, "sell", 10, 60_000);
   if (limited) return limited;
   try {
-    const { item, price, seed } = (await req.json()) as { item: string; price: number; seed: string };
+    const { item, price, seed, seller } = (await req.json()) as {
+      item: string;
+      price: number;
+      seed: string;
+      seller?: string;
+    };
     if (typeof item !== "string" || !item.trim()) {
       return NextResponse.json({ error: "item required" }, { status: 400 });
     }
     const safePrice = Math.max(0, Math.min(MAX_PRICE, Number(price) || 0));
+    const sellerAddr =
+      typeof seller === "string" && /^0x[0-9a-fA-F]{40}$/.test(seller) ? seller : undefined;
     const sale = await sellItem(
       item.trim().slice(0, 80),
       safePrice,
       typeof seed === "string" ? seed.slice(0, 128) : "",
+      sellerAddr,
     );
     return NextResponse.json({ sale });
   } catch (err) {
