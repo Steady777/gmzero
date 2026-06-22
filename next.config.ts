@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   serverExternalPackages: [
     "@0gfoundation/0g-compute-ts-sdk",
     "@0gfoundation/0g-ts-sdk",
+    // Transitive dep of the compute SDK — must stay external (Node/dynamic-require
+    // heavy); bundling it crashes the route at runtime in live mode.
+    "circomlibjs",
   ],
 };
 
